@@ -156,6 +156,7 @@
       const filterLabel = element(documentNode, "label", `${NAMESPACE}-filter`);
       const filter = element(documentNode, "input");
       filter.type = "checkbox";
+      filter.checked = Boolean(viewModel.uncoveredFilterEnabled);
       filter.addEventListener("change", () => actions.onFilter(Boolean(filter.checked)));
       filterLabel.append(filter, documentNode.createTextNode(" 只看未覆盖"));
       controls.append(filterLabel);

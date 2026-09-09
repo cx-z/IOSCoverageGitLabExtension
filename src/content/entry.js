@@ -51,6 +51,7 @@
     let currentMr = null;
     let currentVersion = "unknown";
     let currentResult = null;
+    let uncoveredFilterEnabled = false;
     let destroyed = false;
     const fileCache = new Map();
 
@@ -58,7 +59,10 @@
       return {
         onRefresh: () => void refresh(true),
         onOpenSettings: () => void sendMessage({ action: "OPEN_OPTIONS" }),
-        onFilter: (enabled) => renderer.applyUncoveredFilter(documentNode, enabled),
+        onFilter: (enabled) => {
+          uncoveredFilterEnabled = enabled;
+          renderer.applyUncoveredFilter(documentNode, enabled);
+        },
       };
     }
 
@@ -140,6 +144,7 @@
         currentResult.generation,
         true,
       );
+      renderer.applyUncoveredFilter(documentNode, uncoveredFilterEnabled);
       const renderedPaths = new Set(scan.files
         .filter((file) => !file.ambiguous && file.lines.length > 0)
         .map((file) => file.path));
@@ -159,6 +164,7 @@
         reportPageUrl: result.reportPageUrl,
         uncoveredFileCount: result.uncoveredFileCount,
         canAnnotate: result.canAnnotate,
+        uncoveredFilterEnabled,
         unrenderedFileCount: extra.unrendered,
       };
     }
@@ -171,11 +177,15 @@
       if (!parsed) {
         currentMr = null;
         currentResult = null;
+        uncoveredFilterEnabled = false;
         stopPolling();
         renderer.clearAll(documentNode);
         return;
       }
-      if (manual || navigationChanged(currentMr, parsed) || version !== currentVersion) {
+      const mrChanged = navigationChanged(currentMr, parsed);
+      const versionChanged = version !== currentVersion;
+      if (mrChanged || versionChanged) uncoveredFilterEnabled = false;
+      if (manual || mrChanged || versionChanged) {
         pollCount = 0;
         resetLineState();
       }
