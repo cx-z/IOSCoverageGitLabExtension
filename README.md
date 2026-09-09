@@ -95,7 +95,7 @@ If any value is missing or different, the resolver returns a non-annotatable sta
 
 ## Server dependency
 
-Real data requires an iOS Coverage service compatible with API version 1 and MR Coverage resolver schema version 1. The extension uses only these fixed endpoints:
+The companion backend is [iOS Code Coverage Server](https://github.com/cx-z/iOSCodeCoverageServer). Real data requires a deployment compatible with API version 1 and MR Coverage resolver schema version 1. The extension uses only these fixed endpoints:
 
 ```text
 GET  /health
