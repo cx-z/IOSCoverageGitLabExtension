@@ -1,0 +1,9 @@
+.DS_Store
+*.log
+.env
+.env.local
+*.pem
+*.key
+*.crx
+.nyc_output/
+coverage/

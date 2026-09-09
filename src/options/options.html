@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>iOS Coverage 设置</title>
+  <link rel="stylesheet" href="options.css">
+</head>
+<body>
+  <main>
+    <header>
+      <p class="eyebrow">READ-ONLY GITLAB OVERLAY</p>
+      <h1>iOS Coverage 设置</h1>
+      <p class="intro">授权两个精确 origin 后，扩展会在受支持的 GitLab MR diff 页面展示本机 Coverage 服务的只读结论。</p>
+    </header>
+
+    <form id="settings-form" novalidate>
+      <label for="server-origin">Coverage server URL</label>
+      <div class="field-row">
+        <input id="server-origin" name="serverOrigin" type="url" required spellcheck="false" autocomplete="off">
+        <button id="restore-default" class="secondary" type="button">恢复默认</button>
+      </div>
+      <p class="hint">只接受 http/https origin，不接受路径、query、fragment 或嵌入凭证。</p>
+
+      <label for="gitlab-origin">GitLab origin</label>
+      <input id="gitlab-origin" name="gitlabOrigin" type="url" required spellcheck="false" autocomplete="off" placeholder="https://git.example.com">
+      <p class="hint">只接受一个精确 HTTPS origin。保存时 Chrome 会请求该站点的访问权限。</p>
+
+      <label for="operator-token">Coverage 操作员 Token</label>
+      <input id="operator-token" name="operatorToken" type="password" spellcheck="false" autocomplete="new-password" placeholder="未显示已保存的 Token">
+      <p id="token-state" class="hint">正在读取 Token 状态…</p>
+
+      <div class="actions">
+        <button id="save" type="submit">保存并授权</button>
+        <button id="test-connection" class="secondary" type="button">测试连接</button>
+        <button id="clear-token" class="danger" type="button">清除 Token</button>
+      </div>
+      <p id="status" class="status" role="status" aria-live="polite"></p>
+    </form>
+
+    <section class="boundary" aria-labelledby="security-title">
+      <h2 id="security-title">安全边界</h2>
+      <ul>
+        <li>Token 仅保存在扩展本机存储，并限制为扩展可信上下文可读。</li>
+        <li>Content Script 不能读取 Token，也不能要求后台访问任意 URL。</li>
+        <li>扩展不会向 GitLab 写评论、状态、标签或讨论。</li>
+        <li>只有完整验证 diff 三个 SHA 后才允许逐行标注。</li>
+      </ul>
+    </section>
+  </main>
+  <script src="../shared/origins.js"></script>
+  <script src="options.js"></script>
+</body>
+</html>

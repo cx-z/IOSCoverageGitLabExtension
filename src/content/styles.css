@@ -1,0 +1,79 @@
+#ioscov-summary {
+  --ioscov-border: #dcdcde;
+  --ioscov-muted: #626168;
+  background: #fff;
+  border: 1px solid var(--ioscov-border);
+  border-left: 4px solid #1f75cb;
+  border-radius: 6px;
+  color: #29292d;
+  display: grid;
+  gap: 10px;
+  margin: 12px 0;
+  padding: 12px 14px;
+}
+
+.ioscov-summary-heading,
+.ioscov-metrics,
+.ioscov-metadata,
+.ioscov-controls {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+}
+
+.ioscov-title { font-size: 15px; }
+.ioscov-status,
+.ioscov-metadata,
+.ioscov-metric-label { color: var(--ioscov-muted); }
+.ioscov-metric { display: inline-flex; gap: 5px; }
+.ioscov-metadata { font-size: 12px; }
+
+.ioscov-button {
+  background: #fff;
+  border: 1px solid #bfbfc3;
+  border-radius: 4px;
+  color: #29292d;
+  cursor: pointer;
+  font: inherit;
+  line-height: 24px;
+  padding: 0 9px;
+  text-decoration: none;
+}
+
+.ioscov-button:hover { background: #f0f0f2; text-decoration: none; }
+.ioscov-filter { align-items: center; display: inline-flex; margin: 0; }
+
+.ioscov-line-marker {
+  align-items: center;
+  border: 1px solid currentColor;
+  border-radius: 50%;
+  box-sizing: border-box;
+  display: inline-flex;
+  font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+  font-size: 11px;
+  font-weight: 700;
+  height: 16px;
+  justify-content: center;
+  line-height: 14px;
+  margin-left: 3px;
+  vertical-align: middle;
+  width: 16px;
+}
+
+.ioscov-state-covered { color: #108548; }
+.ioscov-state-uncovered { color: #c91c00; }
+.ioscov-state-not_measurable { color: #737278; }
+.ioscov-state-unknown { color: #9e5400; }
+.ioscov-file-dimmed { opacity: 0.42; }
+
+@media (prefers-color-scheme: dark) {
+  #ioscov-summary {
+    --ioscov-border: #525158;
+    --ioscov-muted: #b7b5bd;
+    background: #2b2a30;
+    color: #f2f1f4;
+  }
+  .ioscov-button { background: #36353b; border-color: #66656b; color: #f2f1f4; }
+  .ioscov-button:hover { background: #414047; }
+}
