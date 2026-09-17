@@ -1,6 +1,6 @@
 # Privacy
 
-Effective date: September 9, 2026
+Effective date: September 17, 2026
 
 iOS Coverage for GitLab is a local, read-only Chrome extension. It has no analytics, telemetry, advertising, tracking pixels, or third-party data service.
 
@@ -20,29 +20,29 @@ The extension does not collect or transmit GitLab source text. It does not read 
 The extension stores these settings in `chrome.storage.local`:
 
 - Coverage server origin;
-- GitLab origin;
-- Coverage operator Token.
+- the list of GitLab origins the user authorized from the page.
 
-The settings are not stored in Chrome sync storage. Extension-local storage is restricted to trusted extension contexts, so the GitLab content script cannot read the operator Token. Use **Clear Token** on the settings page, or remove the extension, to delete the credential from extension storage.
+The settings are not stored in Chrome sync storage. Extension-local storage is restricted to trusted extension contexts, so the GitLab content script cannot read the settings or request arbitrary URLs. The extension stores no credential. Removing the extension deletes everything from extension storage.
 
 ## Network requests
 
-The extension communicates only with origins explicitly configured and approved by the user:
+The extension communicates only with origins explicitly approved by the user or pre-authorized by a company-internal build:
 
-- the selected GitLab origin, where the content script reads supported diff DOM;
-- the selected Coverage server origin, where the Service Worker calls fixed read-only API paths.
+- an authorized GitLab origin, where the content script reads supported diff DOM;
+- the configured Coverage server origin, where the Service Worker calls fixed read-only API paths.
 
 The current MR URL is sent to the configured Coverage server's resolver. The Coverage server may contact its configured GitLab API using server-owned credentials. The extension never receives or stores a GitLab Personal Access Token.
 
-The operator Token is sent only in the `Authorization` header of fixed Coverage API requests. It is not inserted into URLs, GitLab DOM, page storage, logs, or remote telemetry.
+The extension sends no Authorization header. Its read-only Coverage requests are served anonymously inside the trusted intranet when the Coverage service enables anonymous read access.
 
 ## Permissions
 
-- `storage` stores local settings and the operator Token.
-- `scripting` registers the content script for the configured GitLab origin.
-- optional HTTP/HTTPS host access allows the user to approve the exact configured GitLab and Coverage server origins.
+- `storage` stores the Coverage server origin and the authorized GitLab origins list.
+- `scripting` registers the content script for an authorized GitLab origin.
+- `tabs` reads tab URLs so the settings page can detect open GitLab MR pages and offer to authorize that site. Only the MR route (origin, project path, IID) is used; other tab content is not read.
+- optional HTTP/HTTPS host access allows the user to approve an exact GitLab origin from the settings page and the exact Coverage server origin.
 
-The extension does not request Cookie, `webRequest`, browsing-history, download, clipboard, notification, or GitLab write permissions.
+A company-internal build declares static `host_permissions` for the baked GitLab and Coverage server origins; see the build script for details. The extension does not request Cookie, `webRequest`, browsing-history, download, clipboard, notification, or GitLab write permissions.
 
 ## Retention and sharing
 

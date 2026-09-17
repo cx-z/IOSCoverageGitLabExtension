@@ -153,7 +153,7 @@ test("manifest is MV3 and keeps hosts optional with minimal capabilities", () =>
   const manifestPath = path.join(__dirname, "..", "manifest.json");
   const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
   assert.equal(manifest.manifest_version, 3);
-  assert.deepEqual(manifest.permissions, ["storage", "scripting"]);
+  assert.deepEqual(manifest.permissions, ["storage", "scripting", "tabs"]);
   assert.equal("host_permissions" in manifest, false);
   assert.deepEqual(manifest.optional_host_permissions, ["https://*/*", "http://*/*"]);
   assert.equal("content_scripts" in manifest, false);

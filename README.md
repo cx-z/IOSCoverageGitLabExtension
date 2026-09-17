@@ -28,10 +28,11 @@ Markers also expose an accessible label and the evidence source: `current_build`
 ## Requirements
 
 - Google Chrome 102 or later.
-- A GitLab instance served from an HTTPS origin.
-- A reachable, compatible iOS Coverage service; see [Server dependency](#server-dependency).
-- A Coverage operator Token. A Run upload Token cannot call the resolver.
+- A GitLab instance served from an HTTPS origin on the default port 443. Custom HTTPS ports are not supported.
+- A reachable, compatible iOS Coverage service with anonymous read-only access enabled for the extension endpoints; see [Server dependency](#server-dependency).
 - The GitLab project must be registered with the Coverage service.
+
+No GitLab or Coverage credential is required on the user side. The GitLab host is derived from the current page; the Coverage server URL is the only setting.
 
 ## Installation
 
@@ -52,17 +53,27 @@ Markers also expose an accessible label and the evidence source: `current_build`
 
 No build or package-install step is required.
 
+### Company-internal build (pre-authorized)
+
+The open-source extension authorizes each GitLab origin on first use. A company-internal build can bake the GitLab host and Coverage server into the manifest so that anyone who installs it sees coverage immediately after opening an MR link:
+
+```bash
+IOSCOVERAGE_GITLAB_ORIGIN=https://git.example.com \
+IOSCOVERAGE_SERVER_ORIGIN=http://coverage.intra.example.com:8765 \
+./scripts/make-company-build.sh
+```
+
+Load the generated `dist/company` directory as an unpacked extension. No settings or clicks are needed.
+
 ## Configuration
 
-Open the extension settings by clicking its toolbar icon or by selecting **Extension options** on its Chrome details page.
+Open the extension settings by clicking its toolbar icon or by selecting **Extension options** on its Chrome details page. The only setting is:
 
-Configure:
+- **Coverage server URL** — defaults to `http://127.0.0.1:8765`; use the intranet address when the service runs on another machine.
 
-- **Coverage server URL** — defaults to `http://127.0.0.1:8765`.
-- **GitLab origin** — one exact HTTPS origin, for example `https://git.example.com`.
-- **Coverage operator Token** — issued by the configured Coverage service.
+**Test connection** checks the public health endpoint. The GitLab origin is never configured: the extension identifies it from an open GitLab MR page. **保存并授权** and **测试连接** request access to the Coverage server and to the GitLab origin of an open MR tab together in one Chrome prompt; when an MR tab is open, its GitLab origin is recorded and the content script is enabled automatically. The company-internal build pre-authorizes the GitLab host, so no authorization or settings are needed.
 
-Use **Test connection** to check the public health endpoint and authenticated Cycle access. **Clear Token** removes the locally stored credential. Saving settings requests Chrome access to only the two entered origins and dynamically registers the content script for only the configured GitLab origin.
+Upgrading from a version that stored a GitLab origin migrates that origin into the authorized list and re-enables the content script automatically; any previously stored operator Token is deleted during the migration.
 
 ## Using the extension
 
@@ -95,11 +106,10 @@ If any value is missing or different, the resolver returns a non-annotatable sta
 
 ## Server dependency
 
-The companion backend is [iOS Code Coverage Server](https://github.com/cx-z/iOSCodeCoverageServer). Real data requires a deployment compatible with API version 1 and MR Coverage resolver schema version 1. The extension uses only these fixed endpoints:
+The companion backend is [iOS Code Coverage Server](https://github.com/cx-z/iOSCodeCoverageServer). Real data requires a deployment compatible with API version 1 and MR Coverage resolver schema version 1, with anonymous read-only access enabled (`"anonymous_read": true` in `config/server.json`) so the extension works without any Token. The extension uses only these fixed read-only endpoints:
 
 ```text
 GET  /health
-GET  /api/v1/cycles
 POST /api/v1/integrations/gitlab/merge-request-coverage/resolve
 GET  /api/v1/cycles/<cycle_id>/report
 GET  /api/v1/cycles/<cycle_id>/report/files/<file_id>
@@ -107,14 +117,14 @@ GET  /api/v1/cycles/<cycle_id>/report/files/<file_id>
 
 The resolver request contains exactly `schema_version` and the current `mr_url`. The server must:
 
-- authenticate an operator Token;
+- serve these endpoints without a client credential when `anonymous_read` is enabled;
 - map the exact registered GitLab host, full project path, and MR IID;
 - obtain current MR diff refs using its own GitLab credential;
 - compare all three SHAs with the latest-success Build;
 - return the fixed resolver schema, including `can_annotate`, `should_poll`, and a fixed relative `summary_api` path;
 - remain read-only for this request.
 
-The extension does not create Cycles, upload Builds or Runs, start analysis, or manage the server. Those operations remain part of the server and iOS coverage collection workflow. The server URL must be reachable from Chrome. Plain HTTP should be used only for loopback or a trusted development network.
+The extension does not create Cycles, upload Builds or Runs, start analysis, or manage the server. Those operations remain part of the server and iOS coverage collection workflow. The server URL must be reachable from Chrome; GitLab credentials stay on the server. Plain HTTP should be used only for loopback or a trusted intranet.
 
 ## Privacy and permissions
 
@@ -122,14 +132,15 @@ The extension requests only:
 
 | Permission | Purpose |
 | --- | --- |
-| `storage` | Stores the configured origins and operator Token in extension-local storage. |
-| `scripting` | Dynamically registers the content script for the configured GitLab origin. |
-| Optional HTTPS host access | Connects to the exact GitLab origin entered by the user. |
+| `storage` | Stores the Coverage server URL and the list of GitLab origins the user authorized. |
+| `scripting` | Registers the content script for an authorized GitLab origin. |
+| `tabs` | Reads tab URLs to detect open GitLab MR pages for the authorization flow. |
+| Optional HTTPS host access | Connects to a GitLab origin the user authorized from the settings page. |
 | Optional HTTP/HTTPS host access | Connects to the exact Coverage server origin entered by the user. |
 
-Chrome requires runtime-selected origins to be declared through broad optional host patterns, but the extension requests access only to the exact origins supplied in settings. It has no persistent `host_permissions`, Cookie, `webRequest`, browsing-history, or GitLab write permission.
+The company-internal build additionally declares static `host_permissions` for the baked GitLab and Coverage server origins. The extension has no Cookie, `webRequest`, browsing-history, or GitLab write permission.
 
-The operator Token is stored in `chrome.storage.local`, not sync storage, and storage access is restricted to trusted extension contexts. Content scripts cannot read the Token or request arbitrary URLs. The Service Worker adds the Token only to fixed Coverage API requests. The Token is never inserted into GitLab DOM, URLs, page storage, or logs.
+The extension holds no credential. It does not store or send an operator Token; read-only server access is enforced by the Coverage service inside the trusted intranet. Content scripts cannot request arbitrary URLs. The Service Worker requests only the fixed read-only Coverage API paths above.
 
 The extension has no analytics, telemetry, advertising, or third-party data service. It reads the MR route, repository-relative file paths, and new-side line numbers needed to display coverage; it does not collect or transmit GitLab source text. See [PRIVACY.md](PRIVACY.md) for the complete privacy statement.
 

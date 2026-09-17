@@ -15,7 +15,6 @@
   const RESOLVER_PATH = "/api/v1/integrations/gitlab/merge-request-coverage/resolve";
   const ALLOWED_PATHS = [
     /^\/health$/,
-    /^\/api\/v1\/cycles$/,
     new RegExp(`^/api/v1/cycles/${UUID}/report$`),
     new RegExp(`^/api/v1/cycles/${UUID}/report/files/[0-9a-f]{64}$`),
     /^\/api\/v1\/integrations\/gitlab\/merge-request-coverage\/resolve$/,
@@ -36,19 +35,12 @@
     return `${origin}${path}`;
   }
 
-  async function requestJson(fetchImpl, settings, path, options = {}) {
-    const headers = { Accept: "application/json" };
-    if (!options.public) {
-      if (typeof settings.operatorToken !== "string" || settings.operatorToken.length === 0) {
-        throw new ApiError("unconfigured");
-      }
-      headers.Authorization = `Bearer ${settings.operatorToken}`;
-    }
+  async function requestJson(fetchImpl, settings, path) {
     let response;
     try {
       response = await fetchImpl(fixedUrl(settings.serverOrigin, path), {
         method: "GET",
-        headers,
+        headers: { Accept: "application/json" },
         cache: "no-store",
         redirect: "error",
       });
@@ -75,9 +67,6 @@
   }
 
   async function postResolver(fetchImpl, settings, mrUrl) {
-    if (typeof settings.operatorToken !== "string" || settings.operatorToken.length === 0) {
-      throw new ApiError("unconfigured");
-    }
     let response;
     try {
       response = await fetchImpl(fixedUrl(settings.serverOrigin, RESOLVER_PATH), {
@@ -85,7 +74,6 @@
         headers: {
           Accept: "application/json",
           "Content-Type": "application/json",
-          Authorization: `Bearer ${settings.operatorToken}`,
         },
         body: JSON.stringify({ schema_version: 1, mr_url: mrUrl }),
         cache: "no-store",
@@ -112,18 +100,12 @@
     }
   }
 
-  function assertResolverIdentity(resolver, request, configuredOrigin) {
-    let origin;
-    try {
-      origin = origins.normalizeGitLabOrigin(configuredOrigin);
-    } catch (_error) {
-      throw new ApiError("identity_mismatch");
-    }
-    const expectedOrigin = new URL(origin);
+  function assertResolverIdentity(resolver, request) {
+    const origin = request.mr.origin;
+    const expectedHost = new URL(origin).hostname;
     if (
-      request.mr.origin !== origin ||
-      request.mr.host !== expectedOrigin.hostname ||
-      resolver.mr.host !== expectedOrigin.hostname ||
+      request.mr.host !== expectedHost ||
+      resolver.mr.host !== expectedHost ||
       resolver.mr.project_path !== request.mr.projectPath ||
       resolver.mr.iid !== request.mr.iid
     ) {
@@ -151,12 +133,12 @@
   }
 
   async function resolveMergeRequest(fetchImpl, settings, request) {
-    if (!settings.gitlabOrigin || !settings.serverOrigin || !settings.operatorToken) {
+    if (!settings.serverOrigin) {
       return { status: "unconfigured", canAnnotate: false, shouldPoll: false, files: [] };
     }
     const mrUrl = `${request.mr.origin}${request.mr.pathname}`;
     const resolver = await postResolver(fetchImpl, settings, mrUrl);
-    assertResolverIdentity(resolver, request, settings.gitlabOrigin);
+    assertResolverIdentity(resolver, request);
 
     const reportReference = resolver.report;
     const baseResult = {
@@ -231,8 +213,7 @@
   }
 
   async function testConnection(fetchImpl, settings) {
-    await requestJson(fetchImpl, settings, "/health", { public: true });
-    contracts.validateCycleList(await requestJson(fetchImpl, settings, "/api/v1/cycles"));
+    await requestJson(fetchImpl, settings, "/health");
     return { ok: true };
   }
 

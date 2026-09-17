@@ -21,8 +21,6 @@ const summary = {
 };
 const settings = {
   serverOrigin: "http://127.0.0.1:8765",
-  gitlabOrigin: "https://git.example.com",
-  operatorToken: "neutral-test-operator-token",
 };
 const mr = {
   origin: "https://git.example.com",
@@ -96,11 +94,12 @@ function fixtureFetch(resolver = readyResolver(), report = summaryReport()) {
   return { calls, fetchImpl };
 }
 
-test("resolver uses only the saved operator token and the fixed request schema", async () => {
+test("resolver sends the fixed request schema without any credential", async () => {
   const fixture = fixtureFetch();
   await api.resolveMergeRequest(fixture.fetchImpl, {
     ...settings,
     runToken: "must-not-be-used",
+    operatorToken: "must-not-be-sent",
   }, { mr });
 
   assert.equal(fixture.calls[0].options.method, "POST");
@@ -108,7 +107,7 @@ test("resolver uses only the saved operator token and the fixed request schema",
     new URL(fixture.calls[0].url).pathname,
     "/api/v1/integrations/gitlab/merge-request-coverage/resolve",
   );
-  assert.equal(fixture.calls[0].options.headers.Authorization, `Bearer ${settings.operatorToken}`);
+  assert.equal("Authorization" in fixture.calls[0].options.headers, false);
   assert.deepEqual(JSON.parse(fixture.calls[0].options.body), {
     schema_version: 1,
     mr_url: "https://git.example.com/group/project/merge_requests/42/diffs",
@@ -176,7 +175,7 @@ test("a resolver/report identity race fails closed", async () => {
   );
 });
 
-test("Run Token scope rejection is surfaced as invalid Token", async () => {
+test("a server still requiring a credential is surfaced as invalid Token", async () => {
   const fetchImpl = async () => ({
     ok: false,
     status: 403,
@@ -188,11 +187,22 @@ test("Run Token scope rejection is surfaced as invalid Token", async () => {
   );
 });
 
+test("test connection checks only the public health endpoint", async () => {
+  const calls = [];
+  const fetchImpl = async (url, options) => {
+    calls.push({ path: new URL(url).pathname, method: options.method });
+    return { ok: true, status: 200, json: async () => ({ version: "test" }) };
+  };
+  await api.testConnection(fetchImpl, settings);
+  assert.deepEqual(calls, [{ path: "/health", method: "GET" }]);
+});
+
 test("background request builder rejects arbitrary URLs and paths", () => {
   assert.equal(
-    api.fixedUrl(settings.serverOrigin, "/api/v1/cycles"),
-    "http://127.0.0.1:8765/api/v1/cycles",
+    api.fixedUrl(settings.serverOrigin, "/health"),
+    "http://127.0.0.1:8765/health",
   );
+  assert.throws(() => api.fixedUrl(settings.serverOrigin, "/api/v1/cycles"));
   assert.throws(() => api.fixedUrl(settings.serverOrigin, "/api/v1/admin"));
   assert.throws(() => api.fixedUrl("https://evil.example", "https://evil.example/data"));
 });

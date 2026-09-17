@@ -8,7 +8,9 @@ importScripts(
 );
 
 const CONTENT_SCRIPT_ID = "ios-coverage-gitlab-content";
-const SETTINGS_KEYS = ["serverOrigin", "gitlabOrigin", "operatorToken"];
+const SETTINGS_KEYS = ["serverOrigin"];
+const GRANTED_ORIGINS_KEY = "gitlabOrigins";
+const MAX_GRANTED_ORIGINS = 100;
 const tabSessions = new Map();
 
 async function protectStorage() {
@@ -19,23 +21,34 @@ async function getSettings() {
   const values = await chrome.storage.local.get(SETTINGS_KEYS);
   return {
     serverOrigin: values.serverOrigin || IOSCoverageOrigins.DEFAULT_SERVER_ORIGIN,
-    gitlabOrigin: values.gitlabOrigin || "",
-    operatorToken: values.operatorToken || "",
   };
 }
 
-async function registerContentScript(gitlabOrigin) {
+async function getGrantedOrigins() {
+  const values = await chrome.storage.local.get(GRANTED_ORIGINS_KEY);
+  const origins = Array.isArray(values[GRANTED_ORIGINS_KEY]) ? values[GRANTED_ORIGINS_KEY] : [];
+  return origins.filter((origin) => typeof origin === "string" && origin.length > 0);
+}
+
+async function addGrantedOrigin(gitlabOrigin) {
+  const origins = await getGrantedOrigins();
+  if (!origins.includes(gitlabOrigin)) {
+    origins.push(gitlabOrigin);
+    await chrome.storage.local.set({ [GRANTED_ORIGINS_KEY]: origins.slice(-MAX_GRANTED_ORIGINS) });
+  }
+}
+
+async function registerContentScripts() {
   try {
     await chrome.scripting.unregisterContentScripts({ ids: [CONTENT_SCRIPT_ID] });
   } catch (_error) {
-    // Absence is expected before first configuration.
+    // Absence is expected before first registration.
   }
-  if (!gitlabOrigin) return;
-  const pattern = IOSCoverageOrigins.originPattern(gitlabOrigin);
-  if (!(await chrome.permissions.contains({ origins: [pattern] }))) return;
+  const origins = await getGrantedOrigins();
+  if (origins.length === 0) return;
   await chrome.scripting.registerContentScripts([{
     id: CONTENT_SCRIPT_ID,
-    matches: [pattern],
+    matches: origins.map(IOSCoverageOrigins.originPattern),
     js: [
       "src/shared/contracts.js",
       "src/content/gitlab-url.js",
@@ -49,17 +62,32 @@ async function registerContentScript(gitlabOrigin) {
   }]);
 }
 
+async function migrateLegacySettings() {
+  const values = await chrome.storage.local.get(["gitlabOrigin", "operatorToken"]);
+  if (typeof values.gitlabOrigin === "string" && values.gitlabOrigin.length > 0) {
+    const origins = await getGrantedOrigins();
+    if (!origins.includes(values.gitlabOrigin)) {
+      origins.push(values.gitlabOrigin);
+      await chrome.storage.local.set({ [GRANTED_ORIGINS_KEY]: origins });
+    }
+    await chrome.storage.local.remove("gitlabOrigin");
+  }
+  if (values.operatorToken !== undefined) {
+    await chrome.storage.local.remove("operatorToken");
+  }
+}
+
 async function initialize() {
   await protectStorage();
-  const settings = await getSettings();
-  await registerContentScript(settings.gitlabOrigin);
+  await migrateLegacySettings();
+  await registerContentScripts();
 }
 
 chrome.runtime.onInstalled.addListener(() => {
   void (async () => {
     await initialize();
-    const settings = await getSettings();
-    if (!settings.gitlabOrigin || !settings.operatorToken) {
+    const values = await chrome.storage.local.get("serverOrigin");
+    if (!values.serverOrigin) {
       await chrome.runtime.openOptionsPage();
     }
   })();
@@ -83,10 +111,10 @@ function isOptionsSender(sender) {
   }
 }
 
-async function validateContentSender(sender, message, settings) {
+async function validateContentSender(sender, message) {
   if (!sender.tab || !Number.isInteger(sender.tab.id) || !sender.url) return null;
   const parsed = IOSCoverageGitLabUrl.parseMergeRequestUrl(sender.url);
-  if (!parsed || parsed.origin !== settings.gitlabOrigin) return null;
+  if (!parsed) return null;
   if (message.action === "RESOLVE_MR") {
     if (
       parsed.identity !== message.mr.identity ||
@@ -100,7 +128,7 @@ async function validateContentSender(sender, message, settings) {
 
 function safeFailure(error) {
   const code = error && typeof error.code === "string" ? error.code : "invalid_response";
-  if (code === "unreachable" || code === "invalid_token" || code === "unconfigured") {
+  if (code === "unreachable" || code === "invalid_token") {
     return { ok: false, error: code };
   }
   return { ok: false, error: "invalid_response" };
@@ -111,7 +139,7 @@ async function handleContentMessage(message, sender) {
     return { ok: false, error: "message_not_allowed" };
   }
   const settings = await getSettings();
-  const senderContext = await validateContentSender(sender, message, settings);
+  const senderContext = await validateContentSender(sender, message);
   if (!senderContext) return { ok: false, error: "sender_not_allowed" };
 
   if (message.action === "OPEN_OPTIONS") {
@@ -176,40 +204,70 @@ async function handleOptionsMessage(message) {
   }
   if (message.action === "GET_OPTIONS_STATE") {
     const settings = await getSettings();
+    const origins = await getGrantedOrigins();
     return {
       ok: true,
-      result: {
-        serverOrigin: settings.serverOrigin,
-        gitlabOrigin: settings.gitlabOrigin,
-        hasToken: Boolean(settings.operatorToken),
-      },
+      result: { serverOrigin: settings.serverOrigin, gitlabOrigins: origins },
     };
   }
-  if (message.action === "CLEAR_TOKEN" && Object.keys(message).length === 1) {
-    await chrome.storage.local.remove("operatorToken");
-    tabSessions.clear();
-    return { ok: true };
+  if (message.action === "GET_ACTIVE_GITLAB_MR") {
+    if (Object.keys(message).some((key) => key !== "action")) {
+      return { ok: false, error: "message_not_allowed" };
+    }
+    let tabs = [];
+    try {
+      tabs = await chrome.tabs.query({ currentWindow: true });
+    } catch (_error) {
+      tabs = [];
+    }
+    let best = null;
+    for (const tab of tabs) {
+      if (!tab.url) continue;
+      const parsed = IOSCoverageGitLabUrl.parseMergeRequestUrl(tab.url);
+      if (!parsed) continue;
+      const accessed = Number.isFinite(tab.lastAccessed) ? tab.lastAccessed : 0;
+      if (!best || accessed > best.accessed) {
+        best = { origin: parsed.origin, host: parsed.host, projectPath: parsed.projectPath, iid: parsed.iid, identity: parsed.identity, accessed };
+      }
+    }
+    if (!best) return { ok: true, result: null };
+    const { accessed, ...mr } = best;
+    return { ok: true, result: mr };
+  }
+  if (message.action === "ADD_GRANTED_ORIGIN") {
+    if (Object.keys(message).some((key) => !["action", "origin"].includes(key))) {
+      return { ok: false, error: "message_not_allowed" };
+    }
+    let origin;
+    try {
+      origin = IOSCoverageOrigins.normalizeGitLabOrigin(message.origin);
+    } catch (_error) {
+      let ported = false;
+      try {
+        ported = Boolean(new URL(message.origin).port);
+      } catch (_urlError) {
+        ported = false;
+      }
+      return { ok: false, error: ported ? "unsupported_gitlab_origin" : "invalid_origin" };
+    }
+    await addGrantedOrigin(origin);
+    await registerContentScripts();
+    return { ok: true, result: { origin } };
   }
   if (message.action !== "SAVE_SETTINGS" && message.action !== "TEST_CONNECTION") {
     return { ok: false, error: "message_not_allowed" };
   }
-  const allowedKeys = ["action", "serverOrigin", "gitlabOrigin", "operatorToken"];
+  const allowedKeys = ["action", "serverOrigin"];
   if (Object.keys(message).some((key) => !allowedKeys.includes(key))) {
     return { ok: false, error: "message_not_allowed" };
   }
   let serverOrigin;
-  let gitlabOrigin;
   try {
     serverOrigin = IOSCoverageOrigins.normalizeServerOrigin(message.serverOrigin);
-    gitlabOrigin = IOSCoverageOrigins.normalizeGitLabOrigin(message.gitlabOrigin);
   } catch (_error) {
     return { ok: false, error: "invalid_origin" };
   }
-  const current = await getSettings();
-  const operatorToken = typeof message.operatorToken === "string" && message.operatorToken.length > 0 ?
-    message.operatorToken : current.operatorToken;
-  if (!operatorToken) return { ok: false, error: "unconfigured" };
-  const candidate = { serverOrigin, gitlabOrigin, operatorToken };
+  const candidate = { serverOrigin };
 
   if (message.action === "TEST_CONNECTION") {
     try {
@@ -220,22 +278,22 @@ async function handleOptionsMessage(message) {
     }
   }
 
-  const patterns = [
-    IOSCoverageOrigins.originPattern(serverOrigin),
-    IOSCoverageOrigins.originPattern(gitlabOrigin),
-  ];
+  const current = await getSettings();
+  const patterns = [IOSCoverageOrigins.originPattern(serverOrigin)];
   if (!(await chrome.permissions.contains({ origins: patterns }))) {
     return { ok: false, error: "permission_missing" };
   }
   await chrome.storage.local.set(candidate);
-  await registerContentScript(gitlabOrigin);
   tabSessions.clear();
 
-  const oldPatterns = [current.serverOrigin, current.gitlabOrigin]
-    .filter(Boolean)
-    .map(IOSCoverageOrigins.originPattern)
-    .filter((pattern) => !patterns.includes(pattern));
-  if (oldPatterns.length > 0) await chrome.permissions.remove({ origins: oldPatterns });
+  const oldPattern = current.serverOrigin !== serverOrigin ?
+    IOSCoverageOrigins.originPattern(current.serverOrigin) : null;
+  if (oldPattern) {
+    const granted = await getGrantedOrigins();
+    const stillNeeded = granted.some((origin) =>
+      IOSCoverageOrigins.originPattern(origin) === oldPattern);
+    if (!stillNeeded) await chrome.permissions.remove({ origins: [oldPattern] });
+  }
   return { ok: true };
 }
 
