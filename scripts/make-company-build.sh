@@ -59,12 +59,15 @@ mkdir -p "$OUT"
 cp -R "$ROOT/src" "$OUT/src"
 cp "$ROOT/manifest.json" "$OUT/manifest.json"
 
-python3 - "$OUT/manifest.json" "$GITLAB_ORIGIN" "$SERVER_ORIGIN" <<'PY'
+python3 - "$OUT" "$GITLAB_ORIGIN" "$SERVER_ORIGIN" <<'PY'
 import json
+import re
 import sys
+from pathlib import Path
 
-manifest_path, gitlab_origin, server_origin = sys.argv[1:4]
-manifest = json.load(open(manifest_path, encoding="utf-8"))
+output_dir, gitlab_origin, server_origin = sys.argv[1:4]
+manifest_path = Path(output_dir) / "manifest.json"
+manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
 
 manifest["host_permissions"] = [
     gitlab_origin + "/*",
@@ -77,15 +80,24 @@ manifest["content_scripts"] = [{
         "src/content/gitlab-url.js",
         "src/content/gitlab-dom-adapter.js",
         "src/content/coverage-renderer.js",
+        "src/content/file-annotations.js",
         "src/content/entry.js",
     ],
     "css": ["src/content/styles.css"],
     "run_at": "document_idle",
 }]
 
-with open(manifest_path, "w", encoding="utf-8") as handle:
-    json.dump(manifest, handle, ensure_ascii=False, indent=2)
-    handle.write("\n")
+origins_path = Path(output_dir) / "src/shared/origins.js"
+origins, replacements = re.subn(
+    r'^  const DEFAULT_SERVER_ORIGIN = "[^"]+";$',
+    lambda _: f"  const DEFAULT_SERVER_ORIGIN = {json.dumps(server_origin)};",
+    origins_path.read_text(encoding="utf-8"),
+    flags=re.MULTILINE,
+)
+if replacements != 1:
+    raise SystemExit("Expected exactly one DEFAULT_SERVER_ORIGIN declaration")
+origins_path.write_text(origins, encoding="utf-8")
+manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 PY
 
 cp "$ROOT/LICENSE" "$OUT/LICENSE"

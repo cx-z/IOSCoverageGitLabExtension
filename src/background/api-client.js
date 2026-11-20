@@ -66,7 +66,7 @@
     }
   }
 
-  async function postResolver(fetchImpl, settings, mrUrl) {
+  async function postResolver(fetchImpl, settings, mrUrl, extra = null) {
     let response;
     try {
       response = await fetchImpl(fixedUrl(settings.serverOrigin, RESOLVER_PATH), {
@@ -75,7 +75,7 @@
           Accept: "application/json",
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ schema_version: 1, mr_url: mrUrl }),
+        body: JSON.stringify(extra ? { schema_version: 2, mr_url: mrUrl, ...extra } : { schema_version: 1, mr_url: mrUrl }),
         cache: "no-store",
         redirect: "error",
       });
@@ -94,7 +94,9 @@
       throw new ApiError(code);
     }
     try {
-      return contracts.validateResolverResponse(await response.json());
+      const value = await response.json();
+      return extra ? (extra.file_id ? contracts.validatePresentationFile(value) :
+        contracts.validatePresentationResolver(value)) : contracts.validateResolverResponse(value);
     } catch (_error) {
       throw new ApiError("invalid_response");
     }
@@ -137,7 +139,9 @@
       return { status: "unconfigured", canAnnotate: false, shouldPoll: false, files: [] };
     }
     const mrUrl = `${request.mr.origin}${request.mr.pathname}`;
-    const resolver = await postResolver(fetchImpl, settings, mrUrl);
+    if (request.pageVersion === null) return { status: "page_version_unverified", canAnnotate: false, shouldPoll: true, files: [] };
+    const resolver = await postResolver(fetchImpl, settings, mrUrl,
+      request.pageVersion ? { page_version: request.pageVersion } : null);
     assertResolverIdentity(resolver, request);
 
     const reportReference = resolver.report;
@@ -155,9 +159,21 @@
       reportPageUrl: resolver.cycle ?
         `${origins.normalizeServerOrigin(settings.serverOrigin)}/cycles/${resolver.cycle.id}` : undefined,
       files: [],
+      presentationId: resolver.presentation_id,
+      pageVersion: resolver.page_version,
+      mrUrl,
+      targetDiff: resolver.schema_version === 2 ? resolver.mr.diff : undefined,
+      strictMatch: resolver.projection ? resolver.projection.strict_match : true,
     };
     if (!resolver.can_annotate) return baseResult;
 
+    if (resolver.schema_version === 2) {
+      if (resolver.page_version !== request.pageVersion) throw new ApiError("identity_mismatch");
+      return { ...baseResult, summary: resolver.projection.summary,
+        uncoveredFileCount: resolver.projection.files.filter(file => file.uncovered > 0).length,
+        reportFileCount: resolver.projection.files.length,
+        files: resolver.projection.files.map(file => ({fileId: file.file_id, repoRelativePath: file.repo_relative_path, uncovered: file.uncovered})) };
+    }
     const report = contracts.validateReport(
       await requestJson(fetchImpl, settings, reportReference.summary_api),
     );
@@ -212,6 +228,17 @@
     };
   }
 
+  async function loadPresentationFile(fetchImpl, settings, session, fileId) {
+    const detail = await postResolver(fetchImpl, settings, session.mrUrl, {
+      page_version: session.pageVersion, presentation_id: session.presentationId, file_id: fileId,
+    });
+    if (detail.presentation_id !== session.presentationId || detail.page_version !== session.pageVersion ||
+      detail.cycle_id !== session.cycleId || detail.generation !== session.generation || detail.file.file_id !== fileId) {
+      throw new ApiError("identity_mismatch");
+    }
+    return detail;
+  }
+
   async function testConnection(fetchImpl, settings) {
     await requestJson(fetchImpl, settings, "/health");
     return { ok: true };
@@ -225,9 +252,10 @@
     if (!contracts.isRecord(message) || typeof message.action !== "string") return false;
     if (message.action === "OPEN_OPTIONS") return hasOnlyKeys(message, ["action"]);
     if (message.action === "RESOLVE_MR") {
-      if (!hasOnlyKeys(message, ["action", "mr", "versionState"])) return false;
+      if (!hasOnlyKeys(message, ["action", "mr", "versionState", "pageVersion"])) return false;
       const mr = message.mr;
       return (
+        (message.pageVersion === undefined || message.pageVersion === null || /^[1-9][0-9]{0,18}$/.test(message.pageVersion)) &&
         contracts.isRecord(mr) &&
         hasOnlyKeys(mr, ["origin", "host", "projectPath", "iid", "pathname", "identity"]) &&
         typeof mr.origin === "string" &&
@@ -240,7 +268,8 @@
     }
     if (message.action === "LOAD_REPORT_FILE") {
       return (
-        hasOnlyKeys(message, ["action", "cycleId", "generation", "fileId"]) &&
+        hasOnlyKeys(message, ["action", "cycleId", "generation", "fileId", "presentationId"]) &&
+        (message.presentationId === undefined || /^[0-9a-f]{64}$/.test(message.presentationId)) &&
         new RegExp(`^${UUID}$`).test(message.cycleId) &&
         Number.isInteger(message.generation) &&
         message.generation >= 0 &&
@@ -254,6 +283,7 @@
     ApiError,
     fixedUrl,
     loadReportFile,
+    loadPresentationFile,
     postResolver,
     requestJson,
     resolveMergeRequest,

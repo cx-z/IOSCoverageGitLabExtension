@@ -10,8 +10,10 @@ The Coverage service remains the only source of coverage truth. The extension di
 - Marks new-side changed lines with four distinct, accessible states.
 - Supports GitLab inline and side-by-side diff layouts.
 - Handles lazy-loaded files, collapsed files, SPA-style navigation, and report generation changes.
+- Loads file coverage near the viewport, with at most four file requests in flight and progressive per-file annotations.
+- Coalesces diff mutations by file and skips unchanged markers and summaries.
 - Polls the resolver while analysis is queued or running.
-- Removes line annotations whenever the server cannot prove that the report matches the current diff.
+- Removes line annotations when the server or actual row identity cannot prove applicability to the displayed diff.
 - Uses no framework, bundler, remote executable code, or third-party runtime dependency.
 
 ## Coverage states
@@ -19,7 +21,7 @@ The Coverage service remains the only source of coverage truth. The extension di
 | State | Marker | Meaning |
 | --- | --- | --- |
 | `covered` | Green `✓` | The line is measurable and covered. |
-| `uncovered` | Red `×` | The line is measurable but is not fully covered. |
+| `uncovered` | Red `×` | No applicable complete hit exists, including definite new/modified code. |
 | `not_measurable` | Gray `·` | The line has no measurable coverage region. |
 | `unknown` | Orange `?` | The service cannot determine the state reliably. |
 
@@ -63,7 +65,7 @@ IOSCOVERAGE_SERVER_ORIGIN=http://coverage.intra.example.com:8765 \
 ./scripts/make-company-build.sh
 ```
 
-Load the generated `dist/company` directory as an unpacked extension. No settings or clicks are needed.
+Load the generated `dist/company` directory as an unpacked extension. The build uses the supplied Coverage origin for both the default URL and host access. If the extension already has a saved URL, use **Restore default** and save the setting to switch to the new origin.
 
 ## Configuration
 
@@ -84,7 +86,9 @@ Open the latest diff page of a supported merge request:
 /group/project/-/merge_requests/42/diffs
 ```
 
-The summary explains the current state. When the resolver returns `can_annotate=true`, the extension loads the matching report and visible file details, then adds line markers using only this exact key:
+The summary explains the current state and appears independently of file-detail loading. When the resolver returns `can_annotate=true`, the extension loads the matching report and observes file containers with a 600-pixel viewport margin. Only nearby files have their new-side rows scanned and their coverage details requested, with at most four file jobs in flight. Each completed file is annotated immediately; large plans yield between batches of 200 markers. Scrolling to another file schedules its annotations without loading the entire MR.
+
+Line markers use only this exact key:
 
 ```text
 (repo_relative_path, new_line_number)
@@ -92,21 +96,27 @@ The summary explains the current state. When the resolver returns `can_annotate=
 
 MR overview, commits, repository pages, historical diff versions, extra-suffix routes, and look-alike paths are not annotated. The extension does not automatically expand every collapsed large file.
 
-## Why stale reports have no line markers
+The adapter still checks exact file paths across all discovered file headers, including offscreen files, so duplicate or unsupported paths fail closed for the affected files while other verified files continue. DOM mutations are coalesced in a fixed 180-ms window: only affected files are invalidated, and only newly inserted subtrees are searched for new file containers. File details are reused by exact Cycle/generation/presentation/file identity, including in-flight requests. Route/version changes, resolver refreshes, report changes, and teardown invalidate asynchronous commits; rejected or stale resolver results clear line markers.
 
-The server permits annotation only when all three immutable identities match:
+Class-attribute observation is limited to the diff-version controls and nearby file containers, rather than the entire document. File observers are disconnected when their containers leave the viewport margin, and cached row snapshots are invalidated when those files return. SVG classes are read through `getAttribute("class")` because SVG's `className` is an animated-string object, not an HTML class string.
 
-```text
-Build.merge_base_sha      == GitLab diff base_sha
-Build.target_sha_at_build == GitLab diff start_sha
-Build.git_sha             == GitLab diff head_sha
-```
+Unchanged markers and summary models perform no DOM updates. The uncovered filter uses each file's server-provided uncovered count, so an offscreen file is not dimmed merely because its line markers have not loaded. `尚未标注文件` counts report files without successfully applied line annotations; viewport loading does not alter the server's coverage totals or states.
 
-If any value is missing or different, the resolver returns a non-annotatable state such as `stale_diff`. The extension immediately removes existing markers and does not fall back to head-only comparison, basename or path-suffix matching, source-text matching, or nearby-line guessing. This prevents an old report from being presented as coverage for the current diff.
+## Current MR and historical Build evidence
+
+Resolver schema 2 binds the active latest-version link's `diff_id` to the registered GitLab MR version and all three fixed refs. Before annotating each actual row, the adapter also checks the structured comment `data-position` (base/start/head, exact new path, new line). Missing or mismatched identity leaves that row unannotated. A stale browser “latest version” label cannot authorize the server's newer MR snapshot.
+
+When Build refs exactly match and no additional independent evidence remains unincorporated, the existing formal report path is preserved. Independently analyzed old-package uploads can update applicable MR lines even while a missing or untested current Build prevents formal report publication. After MR changes, a separate server projection retains applicable unchanged-line hits, follows line movement, marks definite new/modified code red, and limits orange to ambiguity or unavailable data. It compares directly with valid Build snapshots, so further commits cannot accidentally restore green; a proven restoration of original code may recover its original hit. Copies never borrow green merely because their text matches.
+
+The current-MR summary and uncovered filter use complete server projection counts. Mismatched versions show classification counts and a historical-evidence label; they do not show a current-MR percentage. Green tooltips identify source Build and commit; report metadata includes its published time. Both kinds of uncovered line share the same red label. The formal Cycle report remains unchanged.
+
+Snapshot/file caches and tab authorization include the presentation ID, which binds target version and source evidence identity in addition to generation. Issued IDs also bind the complete result contents; transiently degraded results can recover under a new ID without changing the original ID's details. Late resolver and file responses cannot overwrite newer authorization. Metadata refreshes continue while the tab is visible, including after a successful result, because MR changes need not change report generation. File rendering remains viewport-driven and bounded.
+
+Schema 1 remains supported by the server for older extensions: it still requires exact three-SHA equality and returns `stale_diff` otherwise. New content scripts request schema 2 and fail closed against an old server; they never reinterpret a schema-1 old report as mapped current-MR data.
 
 ## Server dependency
 
-The companion backend is [iOS Code Coverage Server](https://github.com/cx-z/iOSCodeCoverageServer). Real data requires a deployment compatible with API version 1 and MR Coverage resolver schema version 1, with anonymous read-only access enabled (`"anonymous_read": true` in `config/server.json`) so the extension works without any Token. The extension uses only these fixed read-only endpoints:
+The companion backend is [iOS Code Coverage Server](https://github.com/cx-z/iOSCodeCoverageServer). Real data requires a deployment compatible with API version 1 and MR Coverage resolver schema version 2, with anonymous read-only access enabled (`"anonymous_read": true` in `config/server.json`) so the extension works without any Token. The extension uses only these fixed read-only endpoints:
 
 ```text
 GET  /health
@@ -115,13 +125,13 @@ GET  /api/v1/cycles/<cycle_id>/report
 GET  /api/v1/cycles/<cycle_id>/report/files/<file_id>
 ```
 
-The resolver request contains exactly `schema_version` and the current `mr_url`. The server must:
+The schema-2 summary request contains exactly `schema_version`, current `mr_url`, and page-selected `page_version`; file requests additionally carry the issued `presentation_id` and `file_id`. The server must:
 
 - serve these endpoints without a client credential when `anonymous_read` is enabled;
 - map the exact registered GitLab host, full project path, and MR IID;
 - obtain current MR diff refs using its own GitLab credential;
-- compare all three SHAs with the latest-success Build;
-- return the fixed resolver schema, including `can_annotate`, `should_poll`, and a fixed relative `summary_api` path;
+- verify the page version against the current MR three refs, then use the strict report or independent verified line mapping;
+- return the versioned resolver schema with `can_annotate`, `should_poll`, an immutable `presentation_id`, and complete current-MR counts/file identities;
 - remain read-only for this request.
 
 The extension does not create Cycles, upload Builds or Runs, start analysis, or manage the server. Those operations remain part of the server and iOS coverage collection workflow. The server URL must be reachable from Chrome; GitLab credentials stay on the server. Plain HTTP should be used only for loopback or a trusted intranet.
@@ -150,8 +160,8 @@ The extension has no analytics, telemetry, advertising, or third-party data serv
 | --- | --- |
 | Chrome | Version 102 or later, Manifest V3. |
 | GitLab | HTTPS MR diff routes shown above; latest diff only; inline and side-by-side layouts. |
-| Coverage service | API version 1 with MR Coverage resolver schema version 1. |
-| Extension data | Resolver/report/file-detail schema version 1. Unknown or malformed responses fail closed. |
+| Coverage service | API version 1 with MR Coverage resolver schema version 2. |
+| Extension data | MR resolver/presentation schema 2; formal report schema 1 remains separate. Unknown or malformed responses fail closed. |
 
 GitLab compatibility is based on DOM structure rather than a claimed GitLab release range. GitLab UI changes can require an adapter update; when the structure cannot be recognized uniquely, the extension shows an unsupported state and adds no line markers. Firefox, Safari, and other Chromium browsers are not currently tested or supported.
 
@@ -163,7 +173,7 @@ Run the test suite with Node.js's built-in test runner:
 node --test tests/*.test.js
 ```
 
-Tests use neutral fixtures under `https://git.example.com/group/project/...` and require no network access. They cover URL parsing, strict API contracts, the four coverage states and evidence sources, exact path/line matching, idempotent rendering, generation and route cleanup, stale-report behavior, polling, message authorization, and manifest restrictions.
+Tests use neutral fixtures under `https://git.example.com/group/project/...` and require no network access. They cover URL parsing, strict API contracts, the four coverage states and evidence sources, exact path/line matching, idempotent rendering, generation and route cleanup, stale-report behavior, polling, message authorization, and manifest restrictions. The large-diff scheduler tests also cover offscreen deferral, bounded concurrency across generation changes, progressive file rendering, local mutation scans, request reuse, marker batching, and cancellation during navigation/teardown.
 
 The runtime module boundaries are deliberately small:
 
@@ -171,6 +181,7 @@ The runtime module boundaries are deliberately small:
 - `src/content/gitlab-url.js`: supported MR URL parsing;
 - `src/content/gitlab-dom-adapter.js`: exact path and new-side line extraction;
 - `src/content/coverage-renderer.js`: extension-owned summary and line UI;
+- `src/content/file-annotations.js`: controller-owned viewport tracking, incremental file scans, bounded detail loading, and annotation batches;
 - `src/shared/contracts.js`: response validation;
 - `src/options/`: settings and permission requests.
 

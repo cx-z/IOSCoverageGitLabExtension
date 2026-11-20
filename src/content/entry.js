@@ -5,10 +5,13 @@
     (typeof require === "function" ? require("./gitlab-dom-adapter.js") : null);
   const renderer = root.IOSCoverageRenderer ||
     (typeof require === "function" ? require("./coverage-renderer.js") : null);
+  const annotations = root.IOSCoverageFileAnnotations ||
+    (typeof require === "function" ? require("./file-annotations.js") : null);
   const api = factory(
     urls,
     dom,
     renderer,
+    annotations,
     root,
   );
   if (typeof module === "object" && module.exports) {
@@ -32,7 +35,7 @@
     });
     root.__iosCoverageController.start();
   }
-})(typeof globalThis === "object" ? globalThis : self, function createContentEntry(urls, dom, renderer, host) {
+})(typeof globalThis === "object" ? globalThis : self, function createContentEntry(urls, dom, renderer, annotations, host) {
   "use strict";
 
   function navigationChanged(previous, next) {
@@ -44,16 +47,39 @@
   function createController(dependencies) {
     const { documentNode, locationNode, sendMessage, setTimer, clearTimer } = dependencies;
     let observer = null;
+    let versionObserver = null;
+    let versionRoot = null;
     let debounceTimer = null;
     let pollTimer = null;
-    let pollCount = 0;
     let requestGeneration = 0;
     let currentMr = null;
     let currentVersion = "unknown";
+    let currentPageVersion = null;
     let currentResult = null;
     let uncoveredFilterEnabled = false;
     let destroyed = false;
-    const fileCache = new Map();
+    let resolving = false;
+    let pageIdentityInvalidated = false;
+    const eventTarget = dependencies.eventTarget || host;
+    const createMutationObserver = dependencies.createMutationObserver ||
+      (typeof host.MutationObserver === "function" ? ((callback) => new host.MutationObserver(callback)) : null);
+    const createIntersectionObserver = dependencies.createIntersectionObserver ||
+      (typeof host.IntersectionObserver === "function" ?
+        ((callback, options) => new host.IntersectionObserver(callback, options)) : null);
+    const fileAnnotations = annotations.createScheduler({
+      documentNode, sendMessage, setTimer, clearTimer, createIntersectionObserver,
+      observeFile: createMutationObserver ? (element) => {
+        const scopedObserver = createMutationObserver(onMutations);
+        scopedObserver.observe(element, { attributes: true, attributeOldValue: true,
+          attributeFilter: ["class"], subtree: true });
+        return scopedObserver;
+      } : null,
+      isCurrent: () => !destroyed && !resolving && currentResult && currentResult.canAnnotate &&
+        !navigationChanged(currentMr, urls.parseMergeRequestUrl(locationNode.href)) &&
+        currentVersion === dom.readVersionState(documentNode) &&
+        currentPageVersion === dom.readPageVersion(documentNode, locationNode.href),
+      onProgress: (progress) => showResult(progress),
+    });
 
     function actions() {
       return {
@@ -61,7 +87,7 @@
         onOpenSettings: () => void sendMessage({ action: "OPEN_OPTIONS" }),
         onFilter: (enabled) => {
           uncoveredFilterEnabled = enabled;
-          renderer.applyUncoveredFilter(documentNode, enabled);
+          fileAnnotations.setFilter(enabled);
         },
       };
     }
@@ -72,8 +98,7 @@
     }
 
     function resetLineState() {
-      renderer.clearLineMarkers(documentNode);
-      fileCache.clear();
+      fileAnnotations.suspend(true);
     }
 
     function stopPolling() {
@@ -83,14 +108,13 @@
 
     function schedulePolling() {
       stopPolling();
-      if (!currentResult || !currentResult.shouldPoll || pollCount >= 12 || documentNode.hidden) {
+      if (!currentResult || !currentResult.shouldPoll || documentNode.hidden) {
         return;
       }
       pollTimer = setTimer(() => {
         pollTimer = null;
-        pollCount += 1;
         void refresh(false);
-      }, 5000);
+      }, currentResult.presentationId ? 15000 : 5000);
     }
 
     function errorStatus(code) {
@@ -98,60 +122,6 @@
       if (code === "invalid_token") return "invalid_token";
       if (code === "unconfigured") return "unconfigured";
       return "service_error";
-    }
-
-    async function loadVisibleFileDetails(scan, result, token) {
-      const reportFiles = new Map(result.files.map((file) => [file.repoRelativePath, file]));
-      const paths = new Set();
-      for (const file of scan.files) {
-        if (!file.ambiguous && file.path && file.lines.length > 0 && reportFiles.has(file.path)) {
-          paths.add(file.path);
-        }
-      }
-      const details = await Promise.all(Array.from(paths).map(async (path) => {
-        const descriptor = reportFiles.get(path);
-        const cacheKey = `${result.cycleId}:${result.generation}:${descriptor.fileId}`;
-        if (fileCache.has(cacheKey)) return fileCache.get(cacheKey);
-        const response = await sendMessage({
-          action: "LOAD_REPORT_FILE",
-          cycleId: result.cycleId,
-          generation: result.generation,
-          fileId: descriptor.fileId,
-        });
-        if (token !== requestGeneration || !response || !response.ok) return null;
-        fileCache.set(cacheKey, response.result);
-        return response.result;
-      }));
-      return details.filter(Boolean);
-    }
-
-    async function annotateCurrent(token) {
-      if (!currentResult || !currentResult.canAnnotate) {
-        renderer.clearLineMarkers(documentNode);
-        return { annotated: 0, unrendered: currentResult ? currentResult.reportFileCount || 0 : 0 };
-      }
-      const scan = dom.scanDiff(documentNode);
-      if (scan.fileCount === 0 || scan.ambiguousFileCount > 0) {
-        renderer.clearLineMarkers(documentNode);
-        return { annotated: 0, unsupported: true, unrendered: currentResult.reportFileCount || 0 };
-      }
-      const details = await loadVisibleFileDetails(scan, currentResult, token);
-      if (token !== requestGeneration) return { annotated: 0, interrupted: true };
-      const plan = renderer.planAnnotations(scan, details, true);
-      const applied = renderer.applyAnnotationPlan(
-        documentNode,
-        plan,
-        currentResult.generation,
-        true,
-      );
-      renderer.applyUncoveredFilter(documentNode, uncoveredFilterEnabled);
-      const renderedPaths = new Set(scan.files
-        .filter((file) => !file.ambiguous && file.lines.length > 0)
-        .map((file) => file.path));
-      return {
-        ...applied,
-        unrendered: Math.max(0, (currentResult.reportFileCount || 0) - renderedPaths.size),
-      };
     }
 
     function viewModel(result, extra = {}) {
@@ -164,34 +134,48 @@
         reportPageUrl: result.reportPageUrl,
         uncoveredFileCount: result.uncoveredFileCount,
         canAnnotate: result.canAnnotate,
+        strictMatch: result.strictMatch,
         uncoveredFilterEnabled,
         unrenderedFileCount: extra.unrendered,
       };
     }
 
+    function showResult(progress) {
+      if (!currentResult || destroyed || resolving) return;
+      const result = progress.unsupported && currentResult.canAnnotate ?
+        { ...currentResult, status: "dom_unsupported", canAnnotate: false } : currentResult;
+      show(viewModel(result, progress));
+    }
+
     async function refresh(manual) {
       if (destroyed) return;
       const token = ++requestGeneration;
+      pageIdentityInvalidated = false;
+      resolving = true;
+      fileAnnotations.suspend();
       const parsed = urls.parseMergeRequestUrl(locationNode.href);
       const version = parsed ? dom.readVersionState(documentNode) : "unknown";
       if (!parsed) {
         currentMr = null;
         currentResult = null;
+        resolving = false;
         uncoveredFilterEnabled = false;
         stopPolling();
+        resetLineState();
         renderer.clearAll(documentNode);
         return;
       }
+      const pageVersion = dom.readPageVersion(documentNode, locationNode.href);
       const mrChanged = navigationChanged(currentMr, parsed);
-      const versionChanged = version !== currentVersion;
+      const versionChanged = version !== currentVersion || pageVersion !== currentPageVersion;
       if (mrChanged || versionChanged) uncoveredFilterEnabled = false;
       if (manual || mrChanged || versionChanged) {
-        pollCount = 0;
         resetLineState();
       }
       currentMr = parsed;
       currentVersion = version;
-      show({ status: "loading", canAnnotate: false });
+      currentPageVersion = pageVersion;
+      if (!currentResult || manual || mrChanged || versionChanged) show({ status: "loading", canAnnotate: false });
 
       let response;
       try {
@@ -199,11 +183,22 @@
           action: "RESOLVE_MR",
           mr: parsed,
           versionState: version,
+          pageVersion,
         });
       } catch (_error) {
         response = { ok: false, error: "unreachable" };
       }
       if (destroyed || token !== requestGeneration) return;
+      // A route/version may change before MutationObserver's debounce callback fires.
+      if (
+        navigationChanged(parsed, urls.parseMergeRequestUrl(locationNode.href)) ||
+        version !== dom.readVersionState(documentNode) ||
+        pageVersion !== dom.readPageVersion(documentNode, locationNode.href)
+      ) {
+        void refresh(false);
+        return;
+      }
+      resolving = false;
       if (!response || !response.ok) {
         currentResult = null;
         stopPolling();
@@ -212,19 +207,12 @@
         return;
       }
 
-      const previousGeneration = currentResult && currentResult.generation;
       currentResult = response.result;
-      if (previousGeneration !== undefined && previousGeneration !== currentResult.generation) {
-        resetLineState();
-      }
-      if (!currentResult.canAnnotate) renderer.clearLineMarkers(documentNode);
-      const annotation = await annotateCurrent(token);
-      if (destroyed || token !== requestGeneration || annotation.interrupted) return;
-      if (annotation.unsupported) {
-        show(viewModel({ ...currentResult, status: "dom_unsupported", canAnnotate: false }, annotation));
-      } else {
-        show(viewModel(currentResult, annotation));
-      }
+      // Publish the summary independently of file-detail latency.
+      show(viewModel(currentResult));
+      const progress = fileAnnotations.setReport(currentResult);
+      fileAnnotations.setFilter(uncoveredFilterEnabled);
+      showResult(progress);
       schedulePolling();
     }
 
@@ -242,43 +230,75 @@
 
     function mutationIsExtensionOnly(mutation) {
       if (isExtensionOwnedNode(mutation.target)) return true;
-      const changed = [...mutation.addedNodes, ...mutation.removedNodes];
+      if (mutation.type === "attributes" && mutation.attributeName === "class") {
+        const withoutFilter = (value) => (value || "").split(/\s+/)
+          .filter((name) => name && name !== "ioscov-file-dimmed").join(" ");
+        // SVGElement.className is SVGAnimatedString, whereas the attribute is always text.
+        if (withoutFilter(mutation.oldValue) === withoutFilter(mutation.target.getAttribute("class"))) return true;
+      }
+      const changed = [...(mutation.addedNodes || []), ...(mutation.removedNodes || [])];
       return changed.length > 0 && changed.every(isExtensionOwnedNode);
     }
 
     function onMutations(mutations) {
-      if (destroyed || mutations.every(mutationIsExtensionOnly)) return;
-      if (debounceTimer !== null) clearTimer(debounceTimer);
+      if (destroyed) return;
+      const external = mutations.filter((mutation) => !mutationIsExtensionOnly(mutation));
+      if (external.length === 0) return;
+      // Invalidate before debounce so late file chunks cannot cross page versions.
+      if (currentPageVersion !== dom.readPageVersion(documentNode, locationNode.href)) {
+        requestGeneration += 1;
+        pageIdentityInvalidated = true;
+        resetLineState();
+      }
+      fileAnnotations.handleMutations(external);
+      if (debounceTimer !== null) return;
       debounceTimer = setTimer(() => {
         debounceTimer = null;
+        observeVersion();
         const next = urls.parseMergeRequestUrl(locationNode.href);
         const nextVersion = next ? dom.readVersionState(documentNode) : "unknown";
-        if (navigationChanged(currentMr, next) || nextVersion !== currentVersion) {
+        if (pageIdentityInvalidated || navigationChanged(currentMr, next) || nextVersion !== currentVersion ||
+          currentPageVersion !== dom.readPageVersion(documentNode, locationNode.href)) {
           void refresh(false);
-        } else if (currentResult && currentResult.canAnnotate) {
-          const token = requestGeneration;
-          void annotateCurrent(token).then((annotation) => {
-            if (!annotation.interrupted && currentResult) show(viewModel(currentResult, annotation));
-          });
         }
       }, 180);
     }
 
     function onVisibilityChange() {
       if (documentNode.hidden) stopPolling();
-      else if (currentResult && currentResult.shouldPoll) schedulePolling();
+      else {
+        fileAnnotations.resume();
+        if (currentResult && currentResult.shouldPoll) schedulePolling();
+      }
     }
 
     function onPopState() {
       void refresh(false);
     }
 
+    // Global class observation also captures GitLab spinners, SVG icons and syntax highlighting.
+    function observeVersion() {
+      const nextRoot = documentNode.querySelector(".mr-version-dropdown");
+      if (versionRoot === nextRoot) return;
+      if (versionObserver) versionObserver.disconnect();
+      versionRoot = nextRoot;
+      if (versionRoot && createMutationObserver) {
+        versionObserver = createMutationObserver(onMutations);
+        versionObserver.observe(versionRoot, { attributes: true, attributeOldValue: true,
+          attributeFilter: ["class", "href"], subtree: true });
+      }
+    }
+
     function start() {
-      observer = new MutationObserver(onMutations);
-      observer.observe(documentNode.documentElement, { childList: true, subtree: true });
+      observer = createMutationObserver(onMutations);
+      observer.observe(documentNode.documentElement, {
+        childList: true, subtree: true, attributes: true, attributeOldValue: true,
+        attributeFilter: ["data-new-path", "data-title", "data-view", "data-linenumber", "data-position"],
+      });
+      observeVersion();
       documentNode.addEventListener("visibilitychange", onVisibilityChange);
-      host.addEventListener("popstate", onPopState);
-      host.addEventListener("pagehide", destroy, { once: true });
+      eventTarget.addEventListener("popstate", onPopState);
+      eventTarget.addEventListener("pagehide", destroy, { once: true });
       void refresh(false);
     }
 
@@ -287,10 +307,13 @@
       destroyed = true;
       requestGeneration += 1;
       if (observer) observer.disconnect();
+      if (versionObserver) versionObserver.disconnect();
       if (debounceTimer !== null) clearTimer(debounceTimer);
       stopPolling();
       documentNode.removeEventListener("visibilitychange", onVisibilityChange);
-      host.removeEventListener("popstate", onPopState);
+      eventTarget.removeEventListener("popstate", onPopState);
+      eventTarget.removeEventListener("pagehide", destroy);
+      fileAnnotations.destroy();
       renderer.clearAll(documentNode);
     }
 

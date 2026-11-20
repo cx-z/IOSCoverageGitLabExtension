@@ -110,7 +110,8 @@ test("renders four distinct states and four source labels without HTML parsing",
   assert.deepEqual(markers.map((marker) => marker.dataset.state), states);
   assert.deepEqual(markers.map((marker) => marker.getAttribute("role")), ["img", "img", "img", "img"]);
   sources.forEach((source, index) => {
-    assert.match(markers[index].getAttribute("aria-label"), new RegExp(renderer.SOURCE_LABELS[source]));
+    if (states[index] === "uncovered") assert.equal(markers[index].getAttribute("aria-label"), "未覆盖");
+    else assert.match(markers[index].getAttribute("aria-label"), new RegExp(renderer.SOURCE_LABELS[source]));
   });
 });
 
@@ -164,4 +165,48 @@ test("malicious external text is rendered literally and never assigned through i
   }, { onRefresh() {}, onOpenSettings() {}, onFilter() {} });
   assert.match(summary.textContent, /<img src=x onerror=alert\(1\)>/);
   assert.equal(summary.querySelector("img"), null);
+});
+
+test("unchanged markers perform no DOM writes but same-state evidence updates still apply", () => {
+  const documentNode = new FakeDocument();
+  const file = makeFile(documentNode, "Sources/Feature.swift");
+  makeNewLine(documentNode, file, 10);
+  const coverage = line("covered", "mixed");
+  const plan = renderer.planAnnotations(dom.scanDiff(documentNode), [{
+    file: { repo_relative_path: "Sources/Feature.swift" }, lines: [coverage],
+  }], true);
+  assert.equal(renderer.applyLineMarkers(documentNode, plan, 1).updated, 1);
+  const marker = documentNode.querySelector(`.${renderer.MARKER_CLASS}`);
+  let writes = 0;
+  const setAttribute = marker.setAttribute.bind(marker);
+  marker.setAttribute = (...args) => { writes += 1; setAttribute(...args); };
+  Object.defineProperty(marker, "className", {
+    get() { return this._className; },
+    set(value) { writes += 1; this._className = value; },
+  });
+  Object.defineProperty(marker, "textContent", {
+    get() { return this._textContent; },
+    set(value) { writes += 1; this._textContent = value; },
+  });
+  marker.dataset = new Proxy(marker.dataset, {
+    set(target, property, value) { writes += 1; target[property] = value; return true; },
+  });
+  assert.equal(renderer.applyLineMarkers(documentNode, plan, 1).updated, 0);
+  assert.equal(writes, 0);
+  coverage.coverage_source = "current_build";
+  assert.equal(renderer.applyLineMarkers(documentNode, plan, 1).updated, 1);
+  assert.ok(writes > 0);
+  assert.doesNotMatch(marker.getAttribute("aria-label"), /部分 region/);
+});
+
+test("unchanged summary keeps its node and interactive controls", () => {
+  const documentNode = new FakeDocument();
+  const mount = appendElement(documentNode, documentNode, "main", "diffs");
+  const viewModel = { status: "ready", generation: 1, canAnnotate: true };
+  const actions = { onRefresh() {}, onOpenSettings() {}, onFilter() {} };
+  const first = renderer.renderSummary(documentNode, mount, viewModel, actions);
+  const filter = first.querySelector("input");
+  assert.equal(renderer.renderSummary(documentNode, mount, { ...viewModel }, actions), first);
+  assert.equal(first.querySelector("input"), filter);
+  assert.notEqual(renderer.renderSummary(documentNode, mount, { ...viewModel, generation: 2 }, actions), first);
 });

@@ -15,8 +15,18 @@ Validation date: 2026-09-09. The source was one authenticated private self-hoste
 - The active diff version was exposed by `.mr-version-dropdown a.is-active`. Historical and latest selections both can produce a `diff_id` query, so `diff_id` alone is not a history signal. The active label is required; unknown labels fail closed.
 - The sample contained added and modified files. No renamed or deleted file sample was available, so their exact header structure remains unknown. Deleted rows themselves were confirmed and are excluded because they lack a new-side changed cell.
 
-## Diff identity conclusion
+## Diff identity for MR presentation schema 2
 
-No trustworthy structured source for the current diff’s complete `base_commit_sha`, `start_commit_sha`, and `head_commit_sha` was found in the rendered DOM or page runtime. Short commit labels and blob links are insufficient. Some bundled page script text contained generic commit-related symbol names, but it was not a structured current-diff identity and is not consumed.
+The active `.mr-version-dropdown a.is-active` latest-version link exposes a numeric `diff_id`. The adapter requires one unambiguous active latest link whose origin/path match the page and whose ID agrees with any explicit URL `diff_id`. Short commit labels and blob links alone remain insufficient.
 
-The adapter therefore does not expose a diff-identity API. The extension delegates identity resolution to the read-only server resolver, which holds the GitLab credential, fetches the current MR diff refs, compares all three SHAs with the latest-success Build, and returns an explicit `can_annotate` decision. GitLab DOM remains responsible only for exact repository-relative new paths and new-side line numbers.
+New-side diff rows expose a comment button with JSON `data-position`: `position_type`, `base_sha`, `start_sha`, `head_sha`, `new_path`, and `new_line`. The server binds the selected diff ID through registered-project latest version metadata; the extension validates each row's complete three refs, exact path and line against that result before annotation. Missing/malformed/mismatched row metadata never authorizes a marker. This also handles the interval where version controls have updated but old rows remain during asynchronous replacement. These structured fields supersede the earlier observation that no complete row identity had been located.
+
+Server mapping and state decisions are never inferred from DOM source text. Historical diff selections remain unsupported. An unknown version while GitLab is loading is shown as loading and retried. `data-position` and active-link `href` changes participate in invalidation; no global class observer is added.
+
+## Incremental rendering boundary
+
+File containers and exact new paths are discovered before viewport observation; new-side line cells are scanned only for nearby files. An `IntersectionObserver` watches `.diff-file.file-holder` with a 600-pixel root margin. A collapsed file is never expanded by the extension; GitLab's later row insertion invalidates that file's scan, and an offscreen dirty file waits until it approaches the viewport.
+
+The document observer tracks child-list changes and the `data-new-path`, `data-title`, `data-view`, and `data-linenumber` attributes. Class changes are observed separately within `.mr-version-dropdown` and nearby file containers; file class observers are disconnected on viewport exit, and those row snapshots are invalidated on re-entry. This avoids observing unrelated global spinners, icons and syntax-highlight classes. SVG class values must be read via `getAttribute("class")`, not the SVGAnimatedString-valued `className` property.
+
+Mutations inside a file invalidate only that file's row snapshot; newly inserted outer containers are searched only within their own subtree, and detached files are unobserved. Extension-owned summary/marker changes and the extension's file-dimming class do not schedule scans. Page-version checks remain in the content controller; the scheduler uses the adapter only to verify actual row three-ref identity against the server-issued target before applying its decisions.

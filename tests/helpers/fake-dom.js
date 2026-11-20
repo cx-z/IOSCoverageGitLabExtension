@@ -131,6 +131,23 @@ class FakeElement {
     this.parentElement = null;
   }
   addEventListener(type, callback) { this.listeners.set(type, callback); }
+  matches(selector) { return matchesSelector(this, selector); }
+  closest(selector) {
+    let node = this;
+    while (node) {
+      if (node.matches(selector)) return node;
+      node = node.parentElement;
+    }
+    return null;
+  }
+  contains(element) {
+    let node = element;
+    while (node) {
+      if (node === this) return true;
+      node = node.parentElement;
+    }
+    return false;
+  }
   querySelectorAll(selector) {
     const results = [];
     const visit = (node) => {

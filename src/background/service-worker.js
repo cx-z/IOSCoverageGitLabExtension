@@ -54,6 +54,7 @@ async function registerContentScripts() {
       "src/content/gitlab-url.js",
       "src/content/gitlab-dom-adapter.js",
       "src/content/coverage-renderer.js",
+      "src/content/file-annotations.js",
       "src/content/entry.js",
     ],
     css: ["src/content/styles.css"],
@@ -150,44 +151,54 @@ async function handleContentMessage(message, sender) {
     if (message.versionState !== "latest") {
       tabSessions.delete(senderContext.tabId);
       return { ok: true, result: { status: message.versionState === "historical" ?
-        "historical_diff" : "dom_unsupported", canAnnotate: false } };
+        "historical_diff" : "loading", canAnnotate: false, shouldPoll: message.versionState === "unknown" } };
     }
+    const requestSession = { pending: true };
+    tabSessions.set(senderContext.tabId, requestSession);
     try {
       const result = await IOSCoverageApiClient.resolveMergeRequest(fetch, settings, message);
+      if (tabSessions.get(senderContext.tabId) !== requestSession) return { ok: false, error: "request_superseded" };
       if (result.canAnnotate) {
         tabSessions.set(senderContext.tabId, {
           cycleId: result.cycleId,
           generation: result.generation,
           fileIds: new Set(result.files.map((file) => file.fileId)),
           identity: message.mr.identity,
+          presentationId: result.presentationId,
+          pageVersion: result.pageVersion,
+          mrUrl: result.mrUrl,
         });
       } else {
         tabSessions.delete(senderContext.tabId);
       }
       return { ok: true, result };
     } catch (error) {
-      tabSessions.delete(senderContext.tabId);
+      if (tabSessions.get(senderContext.tabId) === requestSession) tabSessions.delete(senderContext.tabId);
       return safeFailure(error);
     }
   }
 
   const session = tabSessions.get(senderContext.tabId);
   if (
-    !session ||
+    !session || session.pending ||
     session.identity !== senderContext.parsed.identity ||
     session.cycleId !== message.cycleId ||
     session.generation !== message.generation ||
+    session.presentationId !== message.presentationId ||
     !session.fileIds.has(message.fileId)
   ) {
     return { ok: false, error: "file_request_not_allowed" };
   }
   try {
-    const result = await IOSCoverageApiClient.loadReportFile(
+    const result = session.presentationId ? await IOSCoverageApiClient.loadPresentationFile(
+      fetch, settings, session, message.fileId,
+    ) : await IOSCoverageApiClient.loadReportFile(
       fetch,
       settings,
       message.cycleId,
       message.fileId,
     );
+    if (tabSessions.get(senderContext.tabId) !== session) return { ok: false, error: "request_superseded" };
     if (result.generation !== session.generation) {
       tabSessions.delete(senderContext.tabId);
       return { ok: false, error: "generation_changed" };

@@ -24,6 +24,37 @@
     return "unknown";
   }
 
+  // The selected version link is page evidence; a live server MR alone is insufficient.
+  function readPageVersion(documentNode, href) {
+    if (readVersionState(documentNode) !== "latest") return null;
+    const active = documentNode.querySelectorAll(".mr-version-dropdown a.is-active");
+    if (active.length !== 1) return null;
+    try {
+      const page = new URL(href);
+      const link = new URL(active[0].getAttribute("href"), page);
+      const version = link.searchParams.get("diff_id");
+      if (link.origin !== page.origin || link.pathname !== page.pathname ||
+          !/^[1-9][0-9]{0,18}$/.test(version || "") ||
+          link.searchParams.has("start_sha") || page.searchParams.has("start_sha") ||
+          (page.searchParams.has("diff_id") && page.searchParams.get("diff_id") !== version)) return null;
+      return version;
+    } catch (_error) { return null; }
+  }
+
+  function lineMatchesDiff(candidate, diff) {
+    const row = candidate.target.closest("tr");
+    if (!row || !diff) return false;
+    for (const button of row.querySelectorAll("[data-position]")) {
+      try {
+        const position = JSON.parse(button.getAttribute("data-position"));
+        if (position.position_type === "text" && position.new_path === candidate.path &&
+          position.new_line === candidate.newLineNumber &&
+          ["base_sha", "start_sha", "head_sha"].every(key => position[key] === diff[key])) return true;
+      } catch (_error) { /* Malformed row identity cannot authorize a marker. */ }
+    }
+    return false;
+  }
+
   function readNewPath(fileNode) {
     const structured = fileNode.getAttribute("data-new-path");
     if (contracts.isSafeRepoPath(structured)) return structured;
@@ -100,6 +131,8 @@
     findSummaryMount,
     parseLineNumber,
     readNewPath,
+    readPageVersion,
+    lineMatchesDiff,
     readVersionState,
     scanDiff,
     scanFile,

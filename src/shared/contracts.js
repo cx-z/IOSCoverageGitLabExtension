@@ -324,6 +324,92 @@
     return value;
   }
 
+  function validatePresentationResolver(value) {
+    if (!hasExactKeys(value, ["schema_version", "status", "can_annotate", "should_poll", "mr", "cycle",
+      "analysis", "report", "page_version", "presentation_id", "projection"]) || value.schema_version !== 2 ||
+      (typeof value.page_version !== "string" || !/^[1-9][0-9]{0,18}$/.test(value.page_version))) throw new Error("Invalid MR presentation");
+    if ((!RESOLVER_STATUSES.has(value.status) && value.status !== "page_version_unverified") ||
+      typeof value.can_annotate !== "boolean" || typeof value.should_poll !== "boolean" ||
+      (value.status === "page_version_unverified" && value.can_annotate)) throw new Error("Invalid presentation status");
+    // Validate the RECEIVED schema-2 state before adapting only reference shapes.
+    const analysis = value.analysis;
+    const hasReport = value.report !== null;
+    const hasProjection = value.projection !== null;
+    const pending = isRecord(analysis) && ["queued", "running"].includes(analysis.status);
+    const empty = ["mr_not_open", "mr_diff_refs_not_ready", "cycle_not_found"].includes(value.status);
+    if (empty && (value.can_annotate || value.should_poll || value.cycle !== null || analysis !== null ||
+      hasReport || hasProjection || value.presentation_id !== null)) throw new Error("Invalid empty state");
+    if (!empty) {
+      if (!isRecord(value.cycle) || !isRecord(analysis)) throw new Error("Missing MR state");
+      if (value.status === "report_not_available" && (value.can_annotate || value.should_poll || hasReport || pending ||
+        analysis.status === "failed")) throw new Error("Invalid missing-report state");
+      if (value.status === "analysis_pending" && (!pending || !value.should_poll || value.can_annotate !== hasReport)) {
+        throw new Error("Invalid pending state");
+      }
+      if (value.status === "analysis_failed" && (analysis.status !== "failed" || value.can_annotate !== hasReport ||
+        value.should_poll !== hasReport)) throw new Error("Invalid failed state");
+      if (value.status === "ready" && (!value.can_annotate || !value.should_poll || !hasReport || pending ||
+        analysis.status === "failed")) throw new Error("Invalid ready state");
+      if (value.status === "page_version_unverified" && (value.can_annotate || !hasReport || value.should_poll !== pending)) {
+        throw new Error("Invalid page-version state");
+      }
+      if (value.status === "stale_diff") throw new Error("Schema 2 requires an explicit page/projection decision");
+    }
+    if (value.can_annotate !== hasProjection) throw new Error("Invalid projection authorization");
+    const legacy = { ...value, schema_version: 1 };
+    delete legacy.page_version; delete legacy.presentation_id; delete legacy.projection;
+    // The original schema-2 state has passed above; reuse schema-1 reference-shape checks only.
+    if (value.status === "page_version_unverified") legacy.status = "stale_diff";
+    if (legacy.report) {
+      legacy.can_annotate = sameDiff(legacy.mr.diff, legacy.report.build_diff);
+      legacy.should_poll = ["queued", "running"].includes(legacy.analysis.status);
+      legacy.status = !legacy.can_annotate ? "stale_diff" : legacy.analysis.status === "failed" ? "analysis_failed" :
+        legacy.should_poll ? "analysis_pending" : "ready";
+    }
+    validateResolverResponse(legacy);
+    if (!value.can_annotate) {
+      if (value.presentation_id !== null || value.projection !== null) throw new Error("Unexpected projection");
+      return value;
+    }
+    const projection = value.projection;
+    if (typeof value.presentation_id !== "string" || !SHA256.test(value.presentation_id) || !value.report ||
+      !hasExactKeys(projection, ["summary", "files", "strict_match"]) ||
+      typeof projection.strict_match !== "boolean" || !isSummary(projection.summary) ||
+      (projection.strict_match && !sameDiff(value.mr.diff, value.report.build_diff)) ||
+      (!projection.strict_match && projection.summary.changed_line_coverage_percent !== null)) {
+      throw new Error("Invalid projection identity");
+    }
+    validateReport({schema_version: 1, status: "complete", cycle_id: value.cycle.id,
+      current_build_id: value.report.current_build_id, generation: value.report.generation,
+      updated_at: value.report.updated_at, ...projection});
+    for (const category of ["covered", "uncovered", "not_measurable", "unknown", "changed_new_side"]) {
+      if (projection.files.some(file => !isNonNegativeInteger(file[category])) ||
+        projection.files.reduce((sum, file) => sum + file[category], 0) !== projection.summary[category]) {
+        throw new Error("Invalid projection totals");
+      }
+    }
+    if (projection.summary.covered + projection.summary.uncovered + projection.summary.not_measurable +
+      projection.summary.unknown !== projection.summary.changed_new_side) throw new Error("Invalid line totals");
+    return value;
+  }
+
+  function validatePresentationFile(value) {
+    if (!isRecord(value) || value.schema_version !== 2 || typeof value.presentation_id !== "string" || !SHA256.test(value.presentation_id) ||
+      (typeof value.page_version !== "string" || !/^[1-9][0-9]{0,18}$/.test(value.page_version))) throw new Error("Invalid file identity");
+    validateFileDetail({ ...value, schema_version: 1 });
+    const numbers = new Set();
+    for (const line of value.lines) {
+      if (numbers.has(line.new_line_number)) throw new Error("Duplicate line");
+      numbers.add(line.new_line_number);
+      if (line.evidence && (!UUID.test(line.evidence.build_id) || !SHA.test(line.evidence.git_sha) ||
+        !SHA256.test(line.evidence.input_set_sha256) || !SHA256.test(line.evidence.export_sha256) ||
+        (line.evidence.reported_at !== undefined && !isTimestamp(line.evidence.reported_at)))) {
+        throw new Error("Invalid evidence identity");
+      }
+    }
+    return value;
+  }
+
   return {
     ANALYSIS_STATES,
     COVERAGE_SOURCES,
@@ -338,5 +424,7 @@
     validateFileDetail,
     validateReport,
     validateResolverResponse,
+    validatePresentationResolver,
+    validatePresentationFile,
   };
 });

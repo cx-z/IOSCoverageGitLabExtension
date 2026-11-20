@@ -10,6 +10,7 @@
   const NAMESPACE = "ioscov";
   const SUMMARY_ID = `${NAMESPACE}-summary`;
   const MARKER_CLASS = `${NAMESPACE}-line-marker`;
+  const summaryModels = new WeakMap();
   const STATUS_META = {
     covered: { symbol: "✓", label: "已覆盖" },
     uncovered: { symbol: "×", label: "未覆盖" },
@@ -34,6 +35,7 @@
     analysis_failed: "Coverage 分析失败，且没有可用旧报告",
     analysis_failed_with_report: "最新分析失败，正在展示上一次成功报告摘要",
     ready: "报告身份已验证，可展示逐行覆盖状态",
+    page_version_unverified: "无法确认当前页面版本，请刷新 GitLab Changes",
     stale_diff: "报告与当前 MR diff 不一致或无法验证",
     mr_not_open: "当前 MR 不是打开状态",
     mr_diff_refs_not_ready: "GitLab 当前 MR diff 身份尚未就绪",
@@ -83,6 +85,10 @@
 
   function renderSummary(documentNode, mountNode, viewModel, actions) {
     let summary = documentNode.querySelector(`#${SUMMARY_ID}`);
+    const modelKey = JSON.stringify(viewModel);
+    if (summary && summary.parentElement === mountNode && summaryModels.get(summary) === modelKey) {
+      return summary;
+    }
     if (summary) summary.remove();
     summary = element(documentNode, "section", `${NAMESPACE}-summary`);
     summary.id = SUMMARY_ID;
@@ -102,13 +108,13 @@
 
     if (viewModel.summary) {
       const metrics = element(documentNode, "div", `${NAMESPACE}-metrics`);
-      appendMetric(
-        documentNode,
-        metrics,
-        "covered / measurable",
-        `${viewModel.summary.covered} / ${viewModel.summary.measurable}`,
-      );
-      appendMetric(documentNode, metrics, "覆盖率", formatPercent(viewModel.summary.changed_line_coverage_percent));
+      if (viewModel.strictMatch === false) {
+        appendMetric(documentNode, metrics, "当前 MR 已覆盖", viewModel.summary.covered);
+        metrics.append(element(documentNode, "span", "", "使用历史构建覆盖证据"));
+      } else {
+        appendMetric(documentNode, metrics, "covered / measurable", `${viewModel.summary.covered} / ${viewModel.summary.measurable}`);
+        appendMetric(documentNode, metrics, "覆盖率", formatPercent(viewModel.summary.changed_line_coverage_percent));
+      }
       appendMetric(documentNode, metrics, "uncovered", viewModel.summary.uncovered);
       appendMetric(documentNode, metrics, "not_measurable", viewModel.summary.not_measurable);
       appendMetric(documentNode, metrics, "unknown", viewModel.summary.unknown);
@@ -163,6 +169,7 @@
     }
     summary.append(controls);
     mountNode.prepend(summary);
+    summaryModels.set(summary, modelKey);
     return summary;
   }
 
@@ -206,22 +213,55 @@
 
   function markerDescription(line) {
     const meta = STATUS_META[line.state];
+    if (line.state === "uncovered") return meta.label;
     const source = SOURCE_LABELS[line.coverage_source] || SOURCE_LABELS.none;
     const regions = Array.isArray(line.regions) ? line.regions : [];
-    const coveredRegions = regions.filter((region) => region && region.covered).length;
-    const partial = line.state === "uncovered" && coveredRegions > 0;
-    return `${meta.label}；来源：${source}${partial ? "；部分 region 未覆盖" : ""}`;
+    const evidence = line.evidence || (regions.find(region => region.source) || {}).source;
+    const identity = evidence ? `；Build ${evidence.build_id}；提交 ${evidence.git_sha}${evidence.reported_at ? `；证据报告 ${evidence.reported_at}` : ""}` : "";
+    const reason = line.state === "unknown" ? "；代码映射或证据数据无法验证" : "";
+    return `${meta.label}；来源：${source}${identity}${reason}`;
   }
 
   function updateMarker(marker, line, generation) {
     const meta = STATUS_META[line.state];
-    marker.className = `${MARKER_CLASS} ${NAMESPACE}-state-${line.state}`;
+    const className = `${MARKER_CLASS} ${NAMESPACE}-state-${line.state}`;
+    const description = markerDescription(line);
+    if (
+      marker.dataset.generation === String(generation) &&
+      marker.dataset.state === line.state && marker.className === className &&
+      marker.textContent === meta.symbol && marker.getAttribute("role") === "img" &&
+      marker.getAttribute("aria-label") === description && marker.getAttribute("title") === description
+    ) return false;
+    marker.className = className;
     marker.dataset.generation = String(generation);
     marker.dataset.state = line.state;
     marker.textContent = meta.symbol;
     marker.setAttribute("role", "img");
-    marker.setAttribute("aria-label", markerDescription(line));
-    marker.setAttribute("title", markerDescription(line));
+    marker.setAttribute("aria-label", description);
+    marker.setAttribute("title", description);
+    return true;
+  }
+
+  // Reconcile one file before applying chunks; removed/renumbered cells must lose stale markers.
+  function pruneLineMarkers(fileNode, plan) {
+    const targets = new Set(plan.map((item) => item.target));
+    for (const marker of fileNode.querySelectorAll(`.${MARKER_CLASS}`)) {
+      if (!targets.has(marker.parentElement)) marker.remove();
+    }
+  }
+
+  // The caller owns report identity and batching; this path never scans the entire diff.
+  function applyLineMarkers(documentNode, plan, generation) {
+    let updated = 0;
+    for (const item of plan) {
+      let marker = item.target.querySelector(`.${MARKER_CLASS}`);
+      if (!marker) {
+        marker = documentNode.createElement("span");
+        item.target.append(marker);
+      }
+      if (updateMarker(marker, item.coverage, generation)) updated += 1;
+    }
+    return { annotated: plan.length, updated };
   }
 
   function applyAnnotationPlan(rootNode, plan, generation, canAnnotate) {
@@ -233,17 +273,7 @@
     if (markers.some((marker) => marker.dataset.generation !== String(generation))) {
       clearLineMarkers(rootNode);
     }
-    let annotated = 0;
-    for (const item of plan) {
-      let marker = item.target.querySelector(`.${MARKER_CLASS}`);
-      if (!marker) {
-        marker = rootNode.createElement("span");
-        item.target.append(marker);
-      }
-      updateMarker(marker, item.coverage, generation);
-      annotated += 1;
-    }
-    return { annotated };
+    return applyLineMarkers(rootNode, plan, generation);
   }
 
   function applyUncoveredFilter(rootNode, enabled) {
@@ -259,12 +289,14 @@
     STATUS_META,
     SUMMARY_ID,
     applyAnnotationPlan,
+    applyLineMarkers,
     applyUncoveredFilter,
     buildLineIndex,
     clearAll,
     clearLineMarkers,
     markerDescription,
     planAnnotations,
+    pruneLineMarkers,
     renderSummary,
   };
 });
