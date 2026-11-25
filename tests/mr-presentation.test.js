@@ -100,3 +100,98 @@ test('review: same-ref additional independent evidence may use category-only pro
   value.projection.strict_match=true; value.report.build_diff.head_sha='d'.repeat(40);
   assert.throws(()=>contracts.validatePresentationResolver(value));
 });
+
+function mappedFixture(covered, uncovered, notMeasurable = 0, unknown = 0) {
+  const value = fixture();
+  const measurable = covered + uncovered;
+  const counts = { covered, uncovered, not_measurable: notMeasurable, unknown,
+    changed_new_side: measurable + notMeasurable + unknown, measurable,
+    changed_line_coverage_percent: measurable ? covered / measurable * 100 : null };
+  value.projection.summary = { ...counts };
+  value.projection.files = [{ file_id: fileId, repo_relative_path: 'File.swift', ...counts }];
+  return value;
+}
+
+test('mapped server ratios pass the actual API client for mismatched and matching refs', async () => {
+  for (const matchingRefs of [false, true]) {
+    for (const [covered, uncovered, percent] of [[12, 1, 12 / 13 * 100], [0, 13, 0], [13, 0, 100], [0, 0, null]]) {
+      const value = mappedFixture(covered, uncovered, 3, 2);
+      if (matchingRefs) value.report.build_diff = { ...diff };
+      assert.doesNotThrow(() => contracts.validatePresentationResolver(value));
+      const expectedCounts = { covered, uncovered, not_measurable: 3, unknown: 2 };
+      const lines = [];
+      for (const [state, count] of Object.entries(expectedCounts)) {
+        for (let index = 0; index < count; index += 1) {
+          lines.push({ new_line_number: lines.length + 1, state,
+            coverage_source: state === 'covered' ? 'historical_inheritance' : 'none',
+            regions: ['covered', 'uncovered'].includes(state) ? [{ covered: state === 'covered' }] : [] });
+        }
+      }
+      const detail = { schema_version: 2, presentation_id: value.presentation_id, page_version: '123',
+        cycle_id: cycle, generation: 1, file: value.projection.files[0], lines };
+      const fetch = async (_url, options) => ({ ok: true, status: 200,
+        json: async () => JSON.parse(options.body).file_id ? detail : value });
+      const settings = { serverOrigin: 'http://127.0.0.1:8765' };
+      const result = await api.resolveMergeRequest(fetch, settings, { mr, pageVersion: '123' });
+      assert.equal(result.summary.changed_line_coverage_percent, percent);
+      assert.equal(result.summary.measurable, covered + uncovered);
+      assert.equal(result.strictMatch, false);
+      assert.equal(result.canAnnotate, true);
+      const loaded = await api.loadPresentationFile(fetch, settings, result, fileId);
+      assert.deepEqual(loaded, detail);
+      const actualCounts = Object.fromEntries(Object.keys(expectedCounts).map(state =>
+        [state, loaded.lines.filter(line => line.state === state).length]));
+      assert.deepEqual(actualCounts, expectedCounts);
+      assert.equal(loaded.lines.length, covered + uncovered + 5);
+      assert.deepEqual(loaded.lines.map(line => line.new_line_number),
+        Array.from({ length: covered + uncovered + 5 }, (_, index) => index + 1));
+      assert.equal(loaded.file.changed_new_side, loaded.lines.length);
+      assert.equal(result.summary.changed_new_side, loaded.lines.length);
+      for (const [state, count] of Object.entries(actualCounts)) {
+        assert.equal(loaded.file[state], count);
+        assert.equal(result.summary[state], count);
+      }
+      assert.equal(loaded.file.measurable, actualCounts.covered + actualCounts.uncovered);
+    }
+  }
+});
+
+test('mapped percentages require the matching denominator and server classification totals', () => {
+  for (const mutate of [
+    v => v.projection.summary.measurable += 1,
+    v => v.projection.summary.changed_line_coverage_percent = 100,
+    v => v.projection.summary.changed_line_coverage_percent = null,
+    v => v.projection.summary.changed_line_coverage_percent = NaN,
+    v => v.projection.summary.changed_line_coverage_percent = Infinity,
+    v => v.projection.files[0].covered -= 1,
+  ]) {
+    const value = mappedFixture(12, 1, 3, 2);
+    mutate(value);
+    assert.throws(() => contracts.validatePresentationResolver(value));
+  }
+});
+
+test('mapped ratio renders server percentages including zero without showing the formal Build ratio', async () => {
+  for (const [covered, uncovered, text] of [[12, 1, '92.3%'], [0, 13, '0.0%'], [13, 0, '100.0%']]) {
+    const value = mappedFixture(covered, uncovered);
+    value.report.summary = { changed_new_side: 100, measurable: 100, covered: 17, uncovered: 83,
+      not_measurable: 0, unknown: 0, changed_line_coverage_percent: 17 };
+    assert.equal(value.report.summary.covered + value.report.summary.uncovered, value.report.summary.measurable);
+    assert.equal(value.report.summary.measurable, value.report.summary.changed_new_side);
+    assert.equal(value.report.summary.covered / value.report.summary.measurable * 100,
+      value.report.summary.changed_line_coverage_percent);
+    const result = await api.resolveMergeRequest(async () => ({ok: true, json: async () => value}),
+      {serverOrigin: 'http://127.0.0.1:8765'}, {mr, pageVersion: '123'});
+    const doc = new FakeDocument(), mount = doc.createElement('div'); doc.append(mount);
+    const section = renderer.renderSummary(doc, mount, result, {onRefresh(){}, onOpenSettings(){}, onFilter(){}});
+    assert.match(section.textContent, /当前 MR 覆盖率/);
+    assert.ok(section.textContent.includes(text));
+    assert.doesNotMatch(section.textContent, /17.0%/);
+    assert.match(section.textContent, /使用历史构建覆盖证据/);
+  }
+  const value = mappedFixture(0, 0, 3, 2);
+  const doc = new FakeDocument(), mount = doc.createElement('div'); doc.append(mount);
+  const section = renderer.renderSummary(doc, mount, {status: 'ready', strictMatch: false,
+    summary: value.projection.summary}, {onRefresh(){}, onOpenSettings(){}, onFilter(){}});
+  assert.doesNotMatch(section.textContent, /覆盖率/);
+});

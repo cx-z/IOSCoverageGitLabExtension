@@ -110,6 +110,10 @@
       const metrics = element(documentNode, "div", `${NAMESPACE}-metrics`);
       if (viewModel.strictMatch === false) {
         appendMetric(documentNode, metrics, "当前 MR 已覆盖", viewModel.summary.covered);
+        if (Number.isFinite(viewModel.summary.changed_line_coverage_percent)) {
+          appendMetric(documentNode, metrics, "covered / measurable", `${viewModel.summary.covered} / ${viewModel.summary.measurable}`);
+          appendMetric(documentNode, metrics, "当前 MR 覆盖率", formatPercent(viewModel.summary.changed_line_coverage_percent));
+        }
         metrics.append(element(documentNode, "span", "", "使用历史构建覆盖证据"));
       } else {
         appendMetric(documentNode, metrics, "covered / measurable", `${viewModel.summary.covered} / ${viewModel.summary.measurable}`);

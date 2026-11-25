@@ -324,6 +324,15 @@
     return value;
   }
 
+  function isMappedSummary(value) {
+    // Older schema-2 servers expose categories only; newer ones provide the MR ratio.
+    if (value.measurable === 0 && value.changed_line_coverage_percent === null) return true;
+    const measurable = value.covered + value.uncovered;
+    return value.measurable === measurable && measurable > 0 &&
+      typeof value.changed_line_coverage_percent === "number" &&
+      Math.abs(value.changed_line_coverage_percent - value.covered / measurable * 100) <= 1e-9;
+  }
+
   function validatePresentationResolver(value) {
     if (!hasExactKeys(value, ["schema_version", "status", "can_annotate", "should_poll", "mr", "cycle",
       "analysis", "report", "page_version", "presentation_id", "projection"]) || value.schema_version !== 2 ||
@@ -376,7 +385,7 @@
       !hasExactKeys(projection, ["summary", "files", "strict_match"]) ||
       typeof projection.strict_match !== "boolean" || !isSummary(projection.summary) ||
       (projection.strict_match && !sameDiff(value.mr.diff, value.report.build_diff)) ||
-      (!projection.strict_match && projection.summary.changed_line_coverage_percent !== null)) {
+      (!projection.strict_match && !isMappedSummary(projection.summary))) {
       throw new Error("Invalid projection identity");
     }
     validateReport({schema_version: 1, status: "complete", cycle_id: value.cycle.id,
