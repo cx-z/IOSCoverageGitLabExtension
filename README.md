@@ -96,6 +96,8 @@ Line markers use only this exact key:
 
 MR overview, commits, repository pages, historical diff versions, extra-suffix routes, and look-alike paths are not annotated. The extension does not automatically expand every collapsed large file.
 
+Closed and merged MRs retain access to existing coverage on their latest diff page. The service still verifies the selected version and all three refs, and the extension checks each actual row before annotating; closing or merging an MR alone does not hide its coverage. Cycle submission and background branch synchronization continue to require an open MR.
+
 The adapter still checks exact file paths across all discovered file headers, including offscreen files, so duplicate or unsupported paths fail closed for the affected files while other verified files continue. DOM mutations are coalesced in a fixed 180-ms window: only affected files are invalidated, and only newly inserted subtrees are searched for new file containers. File details are reused by exact Cycle/generation/presentation/file identity, including in-flight requests. Route/version changes, resolver refreshes, report changes, and teardown invalidate asynchronous commits; rejected or stale resolver results clear line markers.
 
 Class-attribute observation is limited to the diff-version controls and nearby file containers, rather than the entire document. File observers are disconnected when their containers leave the viewport margin, and cached row snapshots are invalidated when those files return. SVG classes are read through `getAttribute("class")` because SVG's `className` is an animated-string object, not an HTML class string.
